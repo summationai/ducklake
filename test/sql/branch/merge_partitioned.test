@@ -1,0 +1,81 @@
+# name: test/sql/branch/merge_partitioned.test
+# description: merged files keep their partition values
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_partitioned_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE sales(region VARCHAR, amount INTEGER)
+
+statement ok
+ALTER TABLE sales SET PARTITIONED BY (region)
+
+statement ok
+INSERT INTO sales VALUES ('EU', 10), ('EU', 20), ('US', 30)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO sales VALUES ('EU', 40), ('APAC', 50)
+
+statement ok
+DELETE FROM sales WHERE region = 'US'
+
+statement ok
+UPDATE sales SET amount = amount * 2 WHERE region = 'EU'
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH b
+
+query II
+SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region
+----
+APAC	50
+EU	140
+
+query I
+SELECT SUM(amount) FROM sales WHERE region = 'EU'
+----
+140
+
+query I
+SELECT SUM(amount) FROM sales WHERE region = 'APAC'
+----
+50
+
+# a filter on the partition column reads only the matching files
+query II
+EXPLAIN ANALYZE SELECT * FROM sales WHERE region = 'APAC'
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1.*
+
+# every live file carries a partition value
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file f WHERE f.end_snapshot IS NULL AND NOT EXISTS (SELECT 1 FROM ducklake_meta.ducklake_file_partition_value p WHERE p.data_file_id = f.data_file_id)
+----
+0
+
+query II
+SELECT region, SUM(amount) FROM sales AT (VERSION => 3) GROUP BY region ORDER BY region
+----
+EU	30
+US	30

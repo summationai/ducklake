@@ -62,7 +62,7 @@ SELECT COUNT(*), SUM(i) FROM t
 ----
 41	6381
 
-# a lake whose branches are all dropped: the tables exist, nothing is pinned
+# a lake whose branches are all merged or dropped: the tables exist, nothing is pinned
 statement ok
 CREATE BRANCH b
 
@@ -76,7 +76,7 @@ statement ok
 SET BRANCH main
 
 statement ok
-DROP BRANCH b
+MERGE BRANCH b
 
 statement ok
 CREATE BRANCH d
@@ -113,4 +113,4 @@ SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
 query II
 SELECT COUNT(*), SUM(i) FROM t
 ----
-62	14573
+82	20763

@@ -42,6 +42,9 @@ statement ok
 CREATE BRANCH lost_row
 
 statement ok
+CREATE BRANCH wrong_table
+
+statement ok
 SET BRANCH missing_main_file
 
 statement ok
@@ -78,6 +81,12 @@ statement ok
 INSERT INTO t VALUES (100)
 
 statement ok
+SET BRANCH wrong_table
+
+statement ok
+DELETE FROM t WHERE i = 3
+
+statement ok
 SET BRANCH main
 
 # the metadata is edited in statements of its own, as it would be by hand
@@ -92,6 +101,9 @@ SET VARIABLE two_branch_deletes = (SELECT branch_id FROM ducklake_branches('duck
 
 statement ok
 SET VARIABLE two_main_deletes = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'two_main_deletes')
+
+statement ok
+SET VARIABLE wrong_table = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'wrong_table')
 
 # a branch delete on a main data file that does not exist
 statement ok
@@ -148,6 +160,15 @@ has more than one active delete file
 
 statement ok
 SET BRANCH main
+
+# a branch delete file filed under a table that does not exist
+statement ok
+UPDATE ducklake_meta.ducklake_branching_delete_file SET table_id = 999999 WHERE branch_id = getvariable('wrong_table')
+
+statement error
+MERGE BRANCH wrong_table
+----
+changed table 999999, which does not exist at its fork
 
 # the branch row itself removed while a connection is on the branch
 statement ok

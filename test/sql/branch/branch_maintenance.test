@@ -60,6 +60,12 @@ SELECT COUNT(*) FROM ducklake_snapshots('ducklake') WHERE snapshot_id = (SELECT 
 ----
 1
 
+# and every snapshot after it, which a merge checks
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake') WHERE snapshot_id > (SELECT fork_snapshot_id FROM ducklake_branches('ducklake'))
+----
+2
+
 # merging adjacent files leaves the files visible at the fork alone
 statement ok
 CALL ducklake_merge_adjacent_files('ducklake')

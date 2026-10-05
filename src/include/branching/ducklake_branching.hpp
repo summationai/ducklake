@@ -24,6 +24,7 @@ class DuckLakeTransaction;
 class ExtensionLoader;
 class FileSystem;
 class NodeStatistics;
+struct DuckLakeCommitContext;
 struct DuckLakeCompactionFileEntry;
 struct DuckLakeDeleteFile;
 struct DuckLakeFileListEntry;
@@ -38,7 +39,7 @@ enum class CompactionType;
 //! call sites in docs/branching/TOUCHPOINTS.md); everything else about branches lives in src/branching.
 class DuckLakeBranching {
 public:
-	//! ducklake_extension.cpp - the branch functions and the CREATE/SET/DROP BRANCH statements
+	//! ducklake_extension.cpp - the branch functions and the CREATE/SET/DROP/MERGE BRANCH statements
 	static void Register(ExtensionLoader &loader, DBConfig &config);
 
 	//===--------------------------------------------------------------------===//
@@ -51,8 +52,10 @@ public:
 	static void EnsureNotOnBranch(DuckLakeTransaction &transaction, const char *operation);
 	//! DuckLakeTransaction::GetSnapshot - a branch transaction reads main at its fork, with the branch loaded
 	static bool TryGetSnapshot(DuckLakeTransaction &transaction, DuckLakeSnapshot &result);
-	//! DuckLakeTransaction::Commit - commits a branch transaction to its branch
+	//! DuckLakeTransaction::Commit - commits to a branch, or merges a branch into main
 	static bool TryCommit(DuckLakeTransaction &transaction);
+	//! DuckLakeTransaction::RunCommitLoop - a merge checks its branch and records itself in each attempt
+	static void PrepareCommitLoop(DuckLakeTransaction &transaction, DuckLakeCommitContext &context);
 	//! DuckLakeTransaction::DeleteSnapshots - keeps the snapshots an open branch needs
 	static void DeleteSnapshots(DuckLakeTransaction &transaction, const vector<DuckLakeSnapshotInfo> &snapshots);
 

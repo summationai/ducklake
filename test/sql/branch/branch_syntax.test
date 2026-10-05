@@ -71,6 +71,16 @@ SET BRANCH
 ----
 Expected a branch name
 
+statement error
+MERGE BRANCH
+----
+Expected a branch name
+
+statement error
+MERGE BRANCH 'it''s' now
+----
+Unexpected input after the branch statement
+
 # statements that are not branch statements stay DuckDB's syntax errors
 statement error
 CREATE NOTHING x
