@@ -1,0 +1,162 @@
+# name: test/sql/branch/merge_rows_table_level.test
+# description: tables main altered, renamed or compacted, and tables in nested schemas, keep the table-level rules when both sides changed their rows
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_table_level_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE altered(i INTEGER)
+
+statement ok
+INSERT INTO altered VALUES (1), (2), (3)
+
+statement ok
+CREATE TABLE renamed(i INTEGER)
+
+statement ok
+INSERT INTO renamed VALUES (1), (2), (3)
+
+statement ok
+CREATE TABLE compacted(i INTEGER)
+
+statement ok
+INSERT INTO compacted VALUES (1), (2), (3)
+
+statement ok
+CREATE BRANCH b_altered
+
+statement ok
+CREATE BRANCH b_renamed
+
+statement ok
+CREATE BRANCH b_compacted
+
+statement ok
+SET BRANCH b_altered
+
+statement ok
+DELETE FROM altered WHERE i = 1
+
+statement ok
+SET BRANCH b_renamed
+
+statement ok
+DELETE FROM renamed WHERE i = 1
+
+statement ok
+SET BRANCH b_compacted
+
+statement ok
+DELETE FROM compacted WHERE i = 1
+
+# main changes other rows of each table, then changes the table itself
+statement ok
+SET BRANCH main
+
+statement ok
+DELETE FROM altered WHERE i = 2
+
+statement ok
+ALTER TABLE altered ADD COLUMN j INTEGER
+
+statement ok
+DELETE FROM renamed WHERE i = 2
+
+statement ok
+ALTER TABLE renamed RENAME TO renamed_on_main
+
+# the files main added since the fork are compacted; the file the branch reads at its fork is not
+statement ok
+INSERT INTO compacted VALUES (4)
+
+statement ok
+INSERT INTO compacted VALUES (5)
+
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake', 'compacted')
+
+statement error
+MERGE BRANCH b_altered
+----
+but another transaction has altered it
+
+statement error
+MERGE BRANCH b_renamed
+----
+but another transaction has deleted from it
+
+statement error
+MERGE BRANCH b_compacted
+----
+but another transaction has compacted it
+
+query II
+FROM altered ORDER BY i
+----
+1	NULL
+3	NULL
+
+query I
+FROM renamed_on_main ORDER BY i
+----
+1
+3
+
+query I
+FROM compacted ORDER BY i
+----
+1
+2
+3
+4
+5
+
+# nested schemas, on a lake with 1.1 metadata; main's delete is inlined unless inlining is off
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/merge_rows_table_level_nested_files', METADATA_CATALOG 'nested_meta')
+
+statement ok
+CREATE SCHEMA nested.outer_s
+
+statement ok
+CREATE SCHEMA nested.outer_s.inner_s
+
+statement ok
+CREATE TABLE nested.outer_s.inner_s.t AS SELECT range AS i FROM range(100)
+
+statement ok
+CALL ducklake_create_branch('nested', 'nb')
+
+statement ok
+CALL ducklake_set_branch('nested', 'nb')
+
+statement ok
+DELETE FROM nested.outer_s.inner_s.t WHERE i = 1
+
+statement ok
+CALL ducklake_set_branch('nested', 'main')
+
+statement ok
+DELETE FROM nested.outer_s.inner_s.t WHERE i = 2
+
+statement error
+CALL ducklake_merge_branch('nested', 'nb')
+----
+Transaction conflict
+
+query I
+SELECT COUNT(*) FROM nested.outer_s.inner_s.t
+----
+99
