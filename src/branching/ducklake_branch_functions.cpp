@@ -2,6 +2,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "branching/ducklake_branch.hpp"
+#include "branching/ducklake_branch_merge_rows.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 
@@ -37,6 +38,10 @@ struct DuckLakeBranchFunctionData : public TableFunctionData {
 	bool if_exists = false;
 	//! Author and message given to MERGE BRANCH
 	unique_ptr<DuckLakeSnapshotCommit> commit_info;
+	//! Report what the merge would do instead of merging
+	bool dry_run = false;
+	//! The dry run of one table, row by row
+	unique_ptr<DuckLakeMergeRowsBindData> rows;
 };
 
 struct DuckLakeBranchFunctionState : public GlobalTableFunctionState {
@@ -197,9 +202,26 @@ TableFunction DuckLakeBranchFunctions::GetSetBranchFunction() {
 //===--------------------------------------------------------------------===//
 // ducklake_merge_branch
 //===--------------------------------------------------------------------===//
+struct DuckLakeMergeBranchState : public GlobalTableFunctionState {
+	bool started = false;
+	//! dry run: the tables still to report
+	vector<DuckLakeMergePreviewEntry> entries;
+	idx_t offset = 0;
+	//! row-level dry run of one table
+	unique_ptr<DuckLakeMergeRowsScan> rows;
+};
+
+static unique_ptr<GlobalTableFunctionState> MergeBranchInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<DuckLakeMergeBranchState>();
+}
+
 static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = BindBranchFunction(context, input);
+	auto dry_run = input.named_parameters.find("dry_run");
+	if (dry_run != input.named_parameters.end() && !dry_run->second.IsNull()) {
+		result->dry_run = dry_run->second.GetValue<bool>();
+	}
 	auto author = input.named_parameters.find("author");
 	auto message = input.named_parameters.find("message");
 	if (author != input.named_parameters.end() || message != input.named_parameters.end()) {
@@ -212,6 +234,56 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 			result->commit_info->is_commit_info_set = true;
 		}
 	}
+	auto table_name = input.named_parameters.find("table_name");
+	auto schema = input.named_parameters.find("schema");
+	if (table_name != input.named_parameters.end() && !table_name->second.IsNull()) {
+		if (!result->dry_run) {
+			throw InvalidInputException("table_name is only valid with dry_run => true");
+		}
+		string schema_name = "main";
+		if (schema != input.named_parameters.end() && !schema->second.IsNull()) {
+			schema_name = schema->second.GetValue<string>();
+		}
+		result->rows = make_uniq<DuckLakeMergeRowsBindData>(DuckLakeMergeRowsScan::Bind(
+		    context, result->catalog, result->branch_name, schema_name, table_name->second.GetValue<string>()));
+		// what the merge would do to the table's rows, in the terms of ducklake_table_changes
+		names.emplace_back("change_type");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("rowid");
+		return_types.emplace_back(LogicalType::BIGINT);
+		names.emplace_back("merge_status");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		for (idx_t column = 0; column < result->rows->column_names.size(); column++) {
+			names.emplace_back(result->rows->column_names[column]);
+			return_types.push_back(result->rows->column_types[column]);
+		}
+		return std::move(result);
+	}
+	if (schema != input.named_parameters.end()) {
+		throw InvalidInputException("schema is only valid with table_name");
+	}
+	if (result->dry_run) {
+		// what the merge would do, table by table
+		names.emplace_back("schema_name");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("table_name");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("status");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("conflict");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("rows_inserted");
+		return_types.emplace_back(LogicalType::BIGINT);
+		names.emplace_back("rows_deleted");
+		return_types.emplace_back(LogicalType::BIGINT);
+		names.emplace_back("files_added");
+		return_types.emplace_back(LogicalType::BIGINT);
+		names.emplace_back("branch_changes");
+		return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+		names.emplace_back("main_changes_since_fork");
+		return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+		return std::move(result);
+	}
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("fork_snapshot_id");
@@ -221,10 +293,53 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 	return std::move(result);
 }
 
+static Value ChangeList(const vector<string> &changes) {
+	vector<Value> values;
+	for (auto &change : changes) {
+		values.emplace_back(change);
+	}
+	return Value::LIST(LogicalType::VARCHAR, std::move(values));
+}
+
+static void MergeBranchDryRun(ClientContext &context, DuckLakeMergeBranchState &state,
+                              const DuckLakeBranchFunctionData &data, DataChunk &output) {
+	if (!state.started) {
+		auto &transaction = DuckLakeTransaction::Get(context, data.catalog);
+		state.entries = DuckLakeBranchManager::PreviewMerge(transaction, data.branch_name);
+		state.started = true;
+	}
+	idx_t count = 0;
+	while (state.offset < state.entries.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &entry = state.entries[state.offset++];
+		output.data[0].SetValue(count, Value(entry.schema_name));
+		output.data[1].SetValue(count, Value(entry.table_name));
+		output.data[2].SetValue(count, Value(entry.conflict.empty() ? "ok" : "conflict"));
+		output.data[3].SetValue(count, entry.conflict.empty() ? Value(LogicalType::VARCHAR) : Value(entry.conflict));
+		output.data[4].SetValue(count, Value::BIGINT(NumericCast<int64_t>(entry.rows_inserted)));
+		output.data[5].SetValue(count, Value::BIGINT(NumericCast<int64_t>(entry.rows_deleted)));
+		output.data[6].SetValue(count, Value::BIGINT(NumericCast<int64_t>(entry.files_added)));
+		output.data[7].SetValue(count, ChangeList(entry.branch_changes));
+		output.data[8].SetValue(count, ChangeList(entry.main_changes));
+		count++;
+	}
+	output.SetChildCardinality(count);
+}
+
 static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &state = data_p.global_state->Cast<DuckLakeBranchFunctionState>();
+	auto &state = data_p.global_state->Cast<DuckLakeMergeBranchState>();
 	auto &data = data_p.bind_data->Cast<DuckLakeBranchFunctionData>();
-	if (state.finished) {
+	if (data.rows) {
+		if (!state.rows) {
+			state.rows = make_uniq<DuckLakeMergeRowsScan>(context, *data.rows);
+		}
+		state.rows->Scan(output);
+		return;
+	}
+	if (data.dry_run) {
+		MergeBranchDryRun(context, state, data, output);
+		return;
+	}
+	if (state.started) {
 		return;
 	}
 	DuckLakeBranchManager::EnsureAutoCommit(context, "MERGE BRANCH");
@@ -236,14 +351,17 @@ static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_
 	output.data[1].Append(Value::UBIGINT(branch.fork_snapshot_id));
 	output.data[2].Append(Value::UBIGINT(branch.head_seq));
 	output.SetChildCardinality(1);
-	state.finished = true;
+	state.started = true;
 }
 
 TableFunction DuckLakeBranchFunctions::GetMergeBranchFunction() {
 	TableFunction function("ducklake_merge_branch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MergeBranchExecute,
-	                       MergeBranchBind, DuckLakeBranchFunctionInit);
+	                       MergeBranchBind, MergeBranchInit);
 	function.named_parameters["author"] = LogicalType::VARCHAR;
 	function.named_parameters["message"] = LogicalType::VARCHAR;
+	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
+	function.named_parameters["table_name"] = LogicalType::VARCHAR;
+	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	return function;
 }
 

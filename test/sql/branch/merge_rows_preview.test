@@ -1,0 +1,133 @@
+# name: test/sql/branch/merge_rows_preview.test
+# description: the dry run of a table both sides changed rows of: per table, and per row with its merge status
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+# main's rows are inlined, as in the bug bash
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_preview_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE prices(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO prices VALUES ('Boots', 80), ('Jacket', 100), ('Scarf', 20), ('Gloves', 30)
+
+statement ok
+CREATE BRANCH pricing
+
+statement ok
+CREATE BRANCH clash
+
+statement ok
+SET BRANCH pricing
+
+# the same change as main, a change of its own, and an insert
+statement ok
+UPDATE prices SET price = 201 WHERE item = 'Jacket'
+
+statement ok
+DELETE FROM prices WHERE item = 'Scarf'
+
+statement ok
+INSERT INTO prices VALUES ('Hat', 25)
+
+statement ok
+SET BRANCH clash
+
+statement ok
+UPDATE prices SET price = 999 WHERE item = 'Jacket'
+
+statement ok
+UPDATE prices SET price = 31 WHERE item = 'Gloves'
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE prices SET price = 201 WHERE item = 'Jacket'
+
+statement ok
+UPDATE prices SET price = 85 WHERE item = 'Boots'
+
+query TTT
+SELECT table_name, status, conflict FROM ducklake_merge_branch('ducklake', 'pricing', dry_run => true)
+----
+prices	ok	NULL
+
+query IIIII
+FROM ducklake_merge_branch('ducklake', 'pricing', dry_run => true, table_name => 'prices')
+----
+update_preimage	1	same as main	Jacket	100
+update_postimage	1	same as main	Jacket	201
+delete	2	ok	Scarf	20
+insert	NULL	ok	Hat	25
+
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'clash', dry_run => true)
+----
+prices	conflict
+
+query IIIII
+FROM ducklake_merge_branch('ducklake', 'clash', dry_run => true, table_name => 'prices')
+----
+update_preimage	1	conflict	Jacket	100
+update_postimage	1	conflict	Jacket	999
+update_preimage	3	ok	Gloves	30
+update_postimage	3	ok	Gloves	31
+
+# the merges do what the dry runs said
+statement error
+MERGE BRANCH clash
+----
+changed 1 row(s) of table "prices" differently since the fork (rowid 1)
+
+statement ok
+MERGE BRANCH pricing
+
+query TI
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	85
+Gloves	30
+Hat	25
+Jacket	201
+
+# the clash on Jacket is gone once the branch takes main's value
+statement ok
+SET BRANCH clash
+
+statement ok
+UPDATE prices SET price = 201 WHERE item = 'Jacket'
+
+statement ok
+SET BRANCH main
+
+query IIIII
+FROM ducklake_merge_branch('ducklake', 'clash', dry_run => true, table_name => 'prices')
+----
+update_preimage	1	same as main	Jacket	100
+update_postimage	1	same as main	Jacket	201
+update_preimage	3	ok	Gloves	30
+update_postimage	3	ok	Gloves	31
+
+statement ok
+MERGE BRANCH clash
+
+query TI
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	85
+Gloves	31
+Hat	25
+Jacket	201

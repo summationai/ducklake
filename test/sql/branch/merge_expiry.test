@@ -112,7 +112,7 @@ SELECT SUM(i) FROM t
 ----
 215
 
-# the fork snapshot itself removed behind our back: the branch cannot be merged
+# the fork snapshot itself removed behind our back: the branch cannot be merged or previewed
 statement ok
 CREATE BRANCH b3
 
@@ -136,6 +136,11 @@ DELETE FROM ducklake_meta.ducklake_snapshot WHERE snapshot_id = getvariable('for
 
 statement error
 MERGE BRANCH b3
+----
+fork snapshot
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'b3', dry_run => true)
 ----
 fork snapshot
 

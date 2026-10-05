@@ -138,6 +138,17 @@ changed 20 row(s) of table "many" differently since the fork (rowid 0, 1, 2, 3, 
 
 # main altered or dropped the table: the table-level rules. Main cannot compact or flush rows an open branch reads at
 # its fork, so those never meet a branch's deletes.
+query TT
+SELECT table_name, conflict FROM ducklake_merge_branch('ducklake', 'table_level', dry_run => true) ORDER BY table_name
+----
+altered	Transaction conflict - attempting to delete from table with index "3" - but another transaction has altered it
+dropped	Transaction conflict - attempting to delete from table with index "4" - but another transaction has dropped it
+
+query IIII
+FROM ducklake_merge_branch('ducklake', 'table_level', dry_run => true, table_name => 'altered')
+----
+delete	0	table conflict	1
+
 statement error
 MERGE BRANCH table_level
 ----
