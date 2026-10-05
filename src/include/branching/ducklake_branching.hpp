@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/set.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -16,6 +17,7 @@
 #include <functional>
 
 namespace duckdb {
+class CatalogEntry;
 class ClientContext;
 class DBConfig;
 class DuckLakeDelete;
@@ -56,6 +58,17 @@ public:
 	static void PrepareCommitLoop(DuckLakeTransaction &transaction, DuckLakeCommitContext &context);
 	//! DuckLakeTransaction::DeleteSnapshots - keeps the snapshots an open branch needs
 	static void DeleteSnapshots(DuckLakeTransaction &transaction, const vector<DuckLakeSnapshotInfo> &snapshots);
+
+	//===--------------------------------------------------------------------===//
+	// Catalog changes on a branch
+	//===--------------------------------------------------------------------===//
+	//! DuckLakeTransaction::CreateEntry / DropEntry / AlterEntry - throw for a catalog change a branch does not support
+	static void CheckCreate(DuckLakeTransaction &transaction, CatalogEntry &entry);
+	static void CheckDrop(DuckLakeTransaction &transaction, CatalogEntry &entry);
+	static void CheckAlter(DuckLakeTransaction &transaction, CatalogEntry &entry, optional_ptr<CatalogEntry> new_entry);
+	//! DuckLakeTransaction::GetTransactionLocalSchema(s) / GetCatalogVersion - a branch is loaded before its catalog
+	//! changes are read
+	static void EnsureLoaded(DuckLakeTransaction &transaction);
 
 	//===--------------------------------------------------------------------===//
 	// Reading and writing on a branch
