@@ -68,6 +68,23 @@ compile in `src/branching/` when upstream changes them; that is where to fix it.
 - `DuckLakeTransactionState` (public): `local_changes`, `dropped_files`, `dropped_file_stats`, `tables_deleted_from`,
   `tables_delete_attempted`, `flushed_inlined_tables`, `CheckForConflicts`, `CleanupFiles`
 
+## Upstream behaviour the row-by-row merge relies on
+
+`src/branching/ducklake_branch_row_merge.cpp` compares the rows of a table both sides changed since the fork, by row id,
+reading them through SQL on internal connections (`ducklake_branch_merge_rows.cpp`). It adds no call site. After a
+rebase, check:
+
+- DuckLake tables expose the virtual columns `rowid`, `filename`, `file_row_number` and `snapshot_id`
+  (`DuckLakeTableEntry::GetVirtualColumns`). A branch's rows have no `snapshot_id`; an inlined row's `filename` is its
+  inlined data table; an UPDATE keeps the row id.
+- `ducklake_table_deletions(catalog, schema, table, start, end)` lists every row main deleted, the old copies of updated
+  rows included.
+- `DuckLakeTransactionState::Commit` uses the `TransactionChangeInformation` it is given for the conflict checks and the
+  catalog writes only; `WriteSnapshotChanges` rebuilds the insert and delete sets from the state. A merge takes the
+  tables it merges row by row out of those sets (`ExcludeFromInsertDeleteRules`).
+- Expiry, compaction and flushing never touch what an open branch reads at its fork, so main's compaction or flush
+  cannot meet a branch's deletes on those rows; `ducklake_rewrite_data_files` can, and keeps the table-level rule.
+
 ## After a rebase
 
 1. `make release`. Compile errors in `src/branching/` mean upstream changed one of the members above.
