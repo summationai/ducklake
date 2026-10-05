@@ -83,19 +83,19 @@ statement ok
 SET VARIABLE scheduled = (SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion)
 
 # exact row counts: only the branch's own deletes count, main's deletes at the fork do not
-query IIIIIIIII
+query IIIIIIIIIII
 CALL ducklake_merge_branch('ducklake', 'z', dry_run => true)
 ----
-main	d	ok	NULL	1	21	1	[inserted_into, deleted_from]	[]
-main	e	ok	NULL	2	50	1	[inserted_into, deleted_from]	[]
-main	m	ok	NULL	0	1	0	[deleted_inlined]	[]
+main	d	ok	NULL	1	21	1	[inserted_into, deleted_from]	[]	table	NULL
+main	e	ok	NULL	2	50	1	[inserted_into, deleted_from]	[]	table	NULL
+main	m	ok	NULL	0	1	0	[deleted_inlined]	[]	table	NULL
 
-query IIIIIIIII
+query IIIIIIIIIII
 SELECT * FROM ducklake_merge_branch('ducklake', 'z', dry_run => true)
 ----
-main	d	ok	NULL	1	21	1	[inserted_into, deleted_from]	[]
-main	e	ok	NULL	2	50	1	[inserted_into, deleted_from]	[]
-main	m	ok	NULL	0	1	0	[deleted_inlined]	[]
+main	d	ok	NULL	1	21	1	[inserted_into, deleted_from]	[]	table	NULL
+main	e	ok	NULL	2	50	1	[inserted_into, deleted_from]	[]	table	NULL
+main	m	ok	NULL	0	1	0	[deleted_inlined]	[]	table	NULL
 
 # nothing changed: no snapshot, no scheduled files, main and the branch read as before
 query I

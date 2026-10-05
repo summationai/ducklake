@@ -282,6 +282,10 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 		return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
 		names.emplace_back("main_changes_since_fork");
 		return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+		names.emplace_back("object_type");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("new_name");
+		return_types.emplace_back(LogicalType::VARCHAR);
 		return std::move(result);
 	}
 	names.emplace_back("branch_name");
@@ -312,7 +316,8 @@ static void MergeBranchDryRun(ClientContext &context, DuckLakeMergeBranchState &
 	while (state.offset < state.entries.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &entry = state.entries[state.offset++];
 		output.data[0].SetValue(count, Value(entry.schema_name));
-		output.data[1].SetValue(count, Value(entry.table_name));
+		output.data[1].SetValue(count,
+		                        entry.object_type == "schema" ? Value(LogicalType::VARCHAR) : Value(entry.table_name));
 		output.data[2].SetValue(count, Value(entry.conflict.empty() ? "ok" : "conflict"));
 		output.data[3].SetValue(count, entry.conflict.empty() ? Value(LogicalType::VARCHAR) : Value(entry.conflict));
 		output.data[4].SetValue(count, Value::BIGINT(NumericCast<int64_t>(entry.rows_inserted)));
@@ -320,6 +325,8 @@ static void MergeBranchDryRun(ClientContext &context, DuckLakeMergeBranchState &
 		output.data[6].SetValue(count, Value::BIGINT(NumericCast<int64_t>(entry.files_added)));
 		output.data[7].SetValue(count, ChangeList(entry.branch_changes));
 		output.data[8].SetValue(count, ChangeList(entry.main_changes));
+		output.data[9].SetValue(count, Value(entry.object_type));
+		output.data[10].SetValue(count, entry.new_name.empty() ? Value(LogicalType::VARCHAR) : Value(entry.new_name));
 		count++;
 	}
 	output.SetChildCardinality(count);

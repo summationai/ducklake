@@ -1,0 +1,365 @@
+# name: test/sql/branch/merge_ddl_conflicts.test
+# description: a merge fails when the branch's catalog changes conflict with main's changes since the fork
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_ddl_conflicts_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t_ins(i INTEGER)
+
+statement ok
+CREATE TABLE t_del(i INTEGER)
+
+statement ok
+INSERT INTO t_del VALUES (1), (2)
+
+statement ok
+CREATE TABLE t_alt(i INTEGER)
+
+statement ok
+CREATE TABLE t_ren(i INTEGER)
+
+statement ok
+CREATE TABLE t_both(i INTEGER)
+
+statement ok
+CREATE TABLE t_drop2(i INTEGER)
+
+statement ok
+CREATE TABLE t_free(i INTEGER)
+
+statement ok
+CREATE VIEW v_ren AS SELECT 1 AS one
+
+statement ok
+CREATE VIEW v_alt AS SELECT 1 AS one
+
+statement ok
+CREATE VIEW v_both AS SELECT 1 AS one
+
+statement ok
+CREATE SCHEMA s_drop
+
+statement ok
+CREATE SCHEMA s_cascade
+
+statement ok
+CREATE TABLE s_cascade.t_casc(i INTEGER)
+
+# one branch per conflict
+statement ok
+CREATE BRANCH r1_ins
+
+statement ok
+SET BRANCH r1_ins
+
+statement ok
+DROP TABLE t_ins
+
+statement ok
+CREATE BRANCH r1_del
+
+statement ok
+SET BRANCH r1_del
+
+statement ok
+DROP TABLE t_del
+
+statement ok
+CREATE BRANCH r1_alt
+
+statement ok
+SET BRANCH r1_alt
+
+statement ok
+DROP TABLE t_alt
+
+statement ok
+CREATE BRANCH r1_ren
+
+statement ok
+SET BRANCH r1_ren
+
+statement ok
+DROP TABLE t_ren
+
+statement ok
+CREATE BRANCH r1_cascade
+
+statement ok
+SET BRANCH r1_cascade
+
+statement ok
+DROP SCHEMA s_cascade CASCADE
+
+statement ok
+CREATE BRANCH r2_ren
+
+statement ok
+SET BRANCH r2_ren
+
+statement ok
+DROP VIEW v_ren
+
+statement ok
+CREATE BRANCH r2_alt
+
+statement ok
+SET BRANCH r2_alt
+
+statement ok
+DROP VIEW v_alt
+
+statement ok
+CREATE BRANCH r3_table
+
+statement ok
+SET BRANCH r3_table
+
+statement ok
+ALTER TABLE t_both RENAME TO t_both_branch
+
+statement ok
+CREATE BRANCH r3_view
+
+statement ok
+SET BRANCH r3_view
+
+statement ok
+ALTER VIEW v_both RENAME TO v_both_branch
+
+statement ok
+CREATE BRANCH same_name
+
+statement ok
+SET BRANCH same_name
+
+statement ok
+CREATE TABLE created_twice(i INTEGER)
+
+statement ok
+CREATE BRANCH same_schema
+
+statement ok
+SET BRANCH same_schema
+
+statement ok
+CREATE SCHEMA s_twice
+
+statement ok
+CREATE BRANCH in_dropped_schema
+
+statement ok
+SET BRANCH in_dropped_schema
+
+statement ok
+CREATE TABLE s_drop.mine(i INTEGER)
+
+statement ok
+CREATE BRANCH drop_drop
+
+statement ok
+SET BRANCH drop_drop
+
+statement ok
+DROP TABLE t_drop2
+
+statement ok
+CREATE BRANCH rename_dropped
+
+statement ok
+SET BRANCH rename_dropped
+
+statement ok
+ALTER TABLE t_drop2 RENAME TO t_drop2_renamed
+
+statement ok
+CREATE BRANCH rename_taken
+
+statement ok
+SET BRANCH rename_taken
+
+statement ok
+ALTER TABLE t_free RENAME TO taken_name
+
+# a rename on the branch and inserts on main merge cleanly
+statement ok
+CREATE BRANCH rename_insert
+
+statement ok
+SET BRANCH rename_insert
+
+statement ok
+ALTER TABLE t_ins RENAME TO t_ins_renamed
+
+statement ok
+INSERT INTO t_ins_renamed VALUES (100)
+
+# main changes since all those forks
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO t_ins VALUES (1)
+
+statement ok
+INSERT INTO s_cascade.t_casc VALUES (1)
+
+statement ok
+DELETE FROM t_del WHERE i = 1
+
+statement ok
+ALTER TABLE t_alt ADD COLUMN j INTEGER
+
+statement ok
+ALTER TABLE t_ren RENAME TO t_ren_main
+
+statement ok
+ALTER VIEW v_ren RENAME TO v_ren_main
+
+statement ok
+COMMENT ON VIEW v_alt IS 'changed on main'
+
+statement ok
+ALTER TABLE t_both RENAME TO t_both_main
+
+statement ok
+ALTER VIEW v_both RENAME TO v_both_main
+
+statement ok
+CREATE TABLE created_twice(i INTEGER)
+
+statement ok
+CREATE SCHEMA s_twice
+
+statement ok
+DROP SCHEMA s_drop
+
+statement ok
+DROP TABLE t_drop2
+
+statement ok
+CREATE TABLE taken_name(i INTEGER)
+
+# a drop on the branch loses to a change on main
+statement error
+MERGE BRANCH r1_ins
+----
+Transaction conflict - branch "r1_ins" dropped table "t_ins", but main inserted into it since the fork
+
+statement error
+MERGE BRANCH r1_del
+----
+Transaction conflict - branch "r1_del" dropped table "t_del", but main deleted from it since the fork
+
+statement error
+MERGE BRANCH r1_alt
+----
+Transaction conflict - branch "r1_alt" dropped table "t_alt", but main altered it since the fork
+
+statement error
+MERGE BRANCH r1_ren
+----
+Transaction conflict - branch "r1_ren" dropped table "t_ren", but main renamed it since the fork
+
+statement error
+MERGE BRANCH r1_cascade
+----
+Transaction conflict - branch "r1_cascade" dropped table "t_casc", but main inserted into it since the fork
+
+statement error
+MERGE BRANCH r2_ren
+----
+Transaction conflict - branch "r2_ren" dropped view "v_ren", but main renamed it since the fork
+
+statement error
+MERGE BRANCH r2_alt
+----
+Transaction conflict - branch "r2_alt" dropped view "v_alt", but main altered it since the fork
+
+# both sides renamed the same object
+statement error
+MERGE BRANCH r3_table
+----
+Transaction conflict - branch "r3_table" renamed table "t_both", but main renamed it since the fork
+
+statement error
+MERGE BRANCH r3_view
+----
+Transaction conflict - branch "r3_view" renamed view "v_both", but main renamed it since the fork
+
+# DuckLake's own rules
+statement error
+MERGE BRANCH same_name
+----
+has been created by another transaction already
+
+statement error
+MERGE BRANCH same_schema
+----
+created a schema with this name already
+
+statement error
+MERGE BRANCH in_dropped_schema
+----
+dropped this schema
+
+statement error
+MERGE BRANCH drop_drop
+----
+dropped it already
+
+statement error
+MERGE BRANCH rename_dropped
+----
+attempting to rename table
+
+statement error
+MERGE BRANCH rename_taken
+----
+has been created by another transaction already
+
+# the failed merges changed nothing: main as it was, every branch still open
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	created_twice
+main	t_alt
+main	t_both_main
+main	t_del
+main	t_free
+main	t_ins
+main	t_ren_main
+main	taken_name
+s_cascade	t_casc
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+16
+
+statement ok
+MERGE BRANCH rename_insert
+
+query I
+SELECT i FROM t_ins_renamed ORDER BY i
+----
+1
+100
+
+statement error
+SELECT * FROM t_ins
+----
+does not exist

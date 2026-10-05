@@ -23,7 +23,9 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | | `Commit()`, first statement in the `try` | `TryCommit(*this)` | commits to the branch, or merges a branch into main |
 | | `RunCommitLoop`, before `state->Commit` | `PrepareCommitLoop(*this, context)` | a merge checks its branch on every attempt and records itself in the snapshot's batch |
 | | `DeleteSnapshots` | `DeleteSnapshots(*this, snapshots)` (replaces `metadata_manager.DeleteSnapshots`) | keeps the snapshots an open branch needs |
-| | `CreateEntry`, `DropEntry`, `AlterEntry`, `GetSnapshot(at_clause)`, `SetConfigOption`, `ResetConfigOption`, `DeleteSnapshots`, `DeleteInlinedData`, `MarkInlinedDataForDeletion`, `AddCompaction`, `AddNameMap`, at entry | `EnsureNotOnBranch(*this, "...")` | operations a branch does not support yet |
+| | `CreateEntry`, `DropEntry`, `AlterEntry`, at entry | `CheckCreate(*this, *entry)`, `CheckDrop(*this, entry)`, `CheckAlter(*this, entry, new_entry.get())` | refuse the catalog changes a branch does not support yet |
+| | `GetTransactionLocalSchemas`, `GetTransactionLocalSchema`, `GetCatalogVersion`, at entry | `EnsureLoaded(*this)` | a branch's catalog changes are loaded before the transaction's own schemas or its catalog version are read |
+| | `GetSnapshot(at_clause)`, `SetConfigOption`, `ResetConfigOption`, `DeleteSnapshots`, `DeleteInlinedData`, `MarkInlinedDataForDeletion`, `AddCompaction`, `AddNameMap`, at entry | `EnsureNotOnBranch(*this, "...")` | operations a branch does not support yet |
 | | `LocalTableChanges::CleanupFiles` (both), `DropTransactionLocalFile`, `AddDeletesToMap` | `RemoveDeleteFile` / `TryRemoveDeleteFile(fs, file)` (replace `fs.RemoveFile` / `fs.TryRemoveFile` of a delete file) | delete files of earlier branch commits are never removed by this transaction |
 | | `TransactionLocalDelete` | `if (OwnsDeleteFile(old_file))` around `files_to_delete.push_back` | same, for the batched removal |
 | `src/storage/ducklake_transaction_state.cpp` | `CheckForConflicts`, after the conflict check | `pre_commit_check(other_changes)` | runs the merge's own checks |
@@ -62,11 +64,28 @@ These are reached through the `DuckLakeBranchManager` friend declarations. A reb
 compile in `src/branching/` when upstream changes them; that is where to fix it.
 
 - `DuckLakeTransaction`: `state`, `snapshot`, `snapshot_lock`, `connection`, `new_name_maps`, `branch_state`,
-  `GetTransactionChanges()`
+  `catalog_version`, `GetTransactionChanges()`
 - `LocalTableChanges`: `lock`, `changes`
 - `DuckLakeDelete`: `TryDropFullyDeletedFile`
 - `DuckLakeTransactionState` (public): `local_changes`, `dropped_files`, `dropped_file_stats`, `tables_deleted_from`,
-  `tables_delete_attempted`, `flushed_inlined_tables`, `CheckForConflicts`, `CleanupFiles`
+  `tables_delete_attempted`, `flushed_inlined_tables`, `CheckForConflicts`, `CleanupFiles`, and the catalog changes
+  `new_schemas`, `new_tables`, `dropped_tables`, `dropped_views`, `dropped_schemas`, `renamed_tables`, `renamed_views`,
+  `new_scalar_macros`, `new_table_macros`, `dropped_scalar_macros`, `dropped_table_macros`
+
+## Upstream behaviour the catalog changes rely on
+
+`src/branching/ducklake_branch_ddl.cpp` rebuilds a branch's schemas, tables and views as transaction-local entries,
+the way `DuckLakeCatalog::LoadSchemaForSnapshot` and `CreateSchema` / `CreateTableExtended` / `CreateView` build them,
+and applies renames and comments through DuckLake's own `Alter` functions. A merge then commits them like any
+transaction that created them. After a rebase, check:
+
+- `ColumnFieldId` mirrors `TransformColumnType` in `ducklake_catalog.cpp`, which is file-static. Column rows are stored
+  in `ducklake_column`'s vocabulary (`DuckLakeTableEntry::GetTableColumns`); a change to either side must reach both.
+- The constructors of `DuckLakeSchemaEntry`, `DuckLakeTableEntry` and `DuckLakeViewEntry`, `DuckLakeTableEntry::Alter`,
+  `DuckLakeViewEntry::AlterEntry`, `DuckLakeCatalog::GetSchemaForSnapshot` and `GetNewUncommittedCatalogVersion`.
+- `DuckLakeCatalogSet` indexes transaction-local schemas by id but not tables; `GetTableEntry` searches for them.
+- A rename on main writes a new `ducklake_table` / `ducklake_view` row and is published as a created table or view;
+  the merge's rename checks (`RenamedOnMain`) depend on both.
 
 ## Upstream behaviour the row-by-row merge relies on
 
@@ -89,7 +108,7 @@ rebase, check:
 
 1. `make release`. Compile errors in `src/branching/` mean upstream changed one of the members above.
 2. `build/release/test/unittest "test/sql/branch/*"`, also with `--test-config test/configs/{no_inline,deletion_vectors,sqlite,ducklake_version}.json`.
-3. The regression directories: `transaction delete update data_inlining deletion_inlining compaction cleanup remove_orphans time_travel table_changes stats snapshot_info checkpoint partitioning`.
+3. The regression directories: `transaction delete update data_inlining deletion_inlining compaction cleanup remove_orphans time_travel table_changes stats snapshot_info checkpoint partitioning catalog alter comments schema_evolution`.
 4. `scripts/branching/coverage.sh` regenerates [COVERAGE.md](COVERAGE.md) and fails if a function in `src/branching/` is
    never executed or an uncovered line has no reason.
 5. Check for a new upstream file-removal site in `LocalTableChanges` that is not routed through `RemoveDeleteFile` /

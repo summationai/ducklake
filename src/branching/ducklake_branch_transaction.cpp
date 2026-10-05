@@ -78,6 +78,8 @@ public:
 	}
 
 	atomic<bool> exists {false};
+	//! The tables holding catalog changes, which lakes whose branch tables predate them lack
+	atomic<bool> definitions_exist {false};
 };
 
 DuckLakeBranchTablesCacheEntry &GetBranchTablesCache(DuckLakeTransaction &transaction) {
@@ -94,6 +96,14 @@ bool DuckLakeBranchManager::IsBranchTablesCached(DuckLakeTransaction &transactio
 
 void DuckLakeBranchManager::SetHasBranchTables(DuckLakeTransaction &transaction, bool value) {
 	GetBranchTablesCache(transaction).exists = value;
+}
+
+bool DuckLakeBranchManager::IsDefinitionTablesCached(DuckLakeTransaction &transaction) {
+	return GetBranchTablesCache(transaction).definitions_exist;
+}
+
+void DuckLakeBranchManager::SetHasDefinitionTables(DuckLakeTransaction &transaction, bool value) {
+	GetBranchTablesCache(transaction).definitions_exist = value;
 }
 
 //===--------------------------------------------------------------------===//
@@ -150,16 +160,12 @@ DuckLakeSnapshot DuckLakeBranchManager::GetBranchSnapshot(DuckLakeTransaction &t
 		state.loading_fork_snapshot = make_uniq<DuckLakeSnapshot>(*fork_snapshot);
 		state.loading_thread = std::this_thread::get_id();
 	}
-	auto &transaction_state = GetTransactionState(transaction);
 	auto loaded = make_uniq<DuckLakeLoadedBranch>();
 	try {
 		LoadBranch(transaction, *branch, *fork_snapshot, *loaded);
 	} catch (...) {
 		lock_guard<mutex> guard(transaction.snapshot_lock);
-		transaction_state.local_changes.Clear();
-		transaction_state.dropped_files.clear();
-		transaction_state.dropped_file_stats.clear();
-		transaction_state.tables_deleted_from.clear();
+		DiscardLoadedBranch(transaction);
 		state.loading_fork_snapshot.reset();
 		state.loading_thread = std::thread::id();
 		throw;
@@ -196,6 +202,7 @@ string DuckLakeBranchManager::ChangesFingerprint(DuckLakeTransaction &transactio
 	auto result = StringUtil::Format("%d/%d/%d/%d/%d/%d", state.SchemaChangesMade(), state.dropped_files.size(),
 	                                 state.flushed_inlined_tables.size(), transaction.new_name_maps.name_maps.size(),
 	                                 state.tables_deleted_from.size(), state.tables_delete_attempted.size());
+	result += "/" + CatalogChangesFingerprint(transaction);
 	for (auto &entry : state.local_changes.Changes()) {
 		auto &changes = entry.GetTableChanges();
 		idx_t delete_files = 0;
