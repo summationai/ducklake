@@ -149,6 +149,10 @@ struct DuckLakeCommitContext {
 	bool skip_drop_empty_inlined = false;
 	//! Whether the metadata schema has the >= 1.1 additions.
 	bool supports_v1_1_metadata = false;
+	//! Runs after every conflict check (also on the first attempt) and may throw to abort the commit
+	std::function<void(const SnapshotChangeInformation &)> pre_commit_check;
+	//! SQL appended to every attempt's commit batch
+	string extra_commit_sql;
 	//! Column names of the inlined data tables under this catalog version.
 	DuckLakeInlinedColNames InlinedColNames() const {
 		return DuckLakeInlinedColNames(supports_v1_1_metadata);
