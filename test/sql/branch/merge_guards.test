@@ -92,6 +92,12 @@ INSERT INTO ri SELECT * FROM ducklake_merge_branch('ducklake', 'b')
 ----
 MERGE BRANCH must be the only change in its transaction
 
+# a catalog change in the merge's statement
+statement error
+CREATE TABLE merged_into AS SELECT * FROM ducklake_merge_branch('ducklake', 'b')
+----
+MERGE BRANCH must be the only change in its transaction
+
 # the branch dropped after the merge loaded it, with changes and without
 statement error
 SELECT branch_name FROM ducklake_merge_branch('ducklake', 'b') UNION ALL SELECT branch_name FROM ducklake_drop_branch('ducklake', 'b')

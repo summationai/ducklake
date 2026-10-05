@@ -1,6 +1,7 @@
 add_library(
   ducklake_branching OBJECT
   ducklake_branch.cpp
+  ducklake_branch_ddl.cpp
   ducklake_branch_functions.cpp
   ducklake_branch_merge_rows.cpp
   ducklake_branch_parser.cpp
