@@ -226,29 +226,27 @@ SELECT COUNT(*), MAX(i) FROM g
 ----
 5	1000
 
+# tables both sides changed rows of merge row by row (merge_rows.test has the rules)
 # main deleted from the table the branch inserted into
-statement error
+statement ok
 MERGE BRANCH c_delete
-----
-conflict
 
 # main inserted into the table the branch deleted from
-statement error
+statement ok
 MERGE BRANCH c_insert
-----
-conflict
 
-# both deleted from the same file
-statement error
+# both deleted other rows of the same file
+statement ok
 MERGE BRANCH c_file
-----
-conflict
 
-# main deleted a row inline from the table the branch deleted from
-statement error
+# main deleted another row inline from the table the branch deleted from
+statement ok
 MERGE BRANCH c_inlined
+
+query IIII
+SELECT (SELECT COUNT(*) FROM b), (SELECT COUNT(*) FROM c), (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM u)
 ----
-conflict
+91	91	80	89
 
 # main altered or dropped the table
 statement error
@@ -268,37 +266,29 @@ MERGE BRANCH c_rewrite
 conflict
 
 # the failed merges left main and the branches as they were
-query IIIII
-SELECT (SELECT COUNT(*) FROM b), (SELECT COUNT(*) FROM c), (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM u), (SELECT COUNT(*) FROM h)
+query I
+SELECT COUNT(*) FROM h
 ----
-90	101	90	99	4
+4
 
 query I
 SELECT COUNT(*) FROM ducklake_branches('ducklake')
 ----
-7
+3
 
 statement ok
-SET BRANCH c_file
+SET BRANCH c_rewrite
 
 query I
-SELECT COUNT(*) FROM d
+SELECT COUNT(*) FROM h
 ----
-90
-
-statement ok
-SET BRANCH c_inlined
-
-query I
-SELECT COUNT(*) FROM u
-----
-90
+2
 
 statement ok
 SET BRANCH main
 
-# nothing of the failed merges was committed or scheduled
+# nothing of the failed merges was scheduled: only files of the merged branches main did not take over
 query I
-SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904 AND path LIKE '%/h/%'
 ----
 0
