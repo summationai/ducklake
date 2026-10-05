@@ -52,7 +52,7 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	result.branch_name = branch_name;
 	result.schema_name = schema_name;
 	result.table_name = table_name;
-	// the table as the branch has it: its columns and its id
+	// the table as the branch has it: its columns, and whether it existed at the fork under which name
 	auto connection = BranchSqlConnection(context, result.catalog_name, branch_name);
 	auto &branch_context = *connection->context;
 	TableIndex main_table_id;
@@ -73,13 +73,25 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 			result.column_names.push_back(column.Name().GetIdentifierName());
 			result.column_types.push_back(column.Type());
 		}
-		result.fork_snapshot_id = DuckLakeTransaction::Get(branch_context, catalog).GetSnapshot().snapshot_id;
+		auto &branch_transaction = DuckLakeTransaction::Get(branch_context, catalog);
+		auto fork_snapshot = branch_transaction.GetSnapshot();
+		result.fork_snapshot_id = fork_snapshot.snapshot_id;
+		if (IsTransactionLocal(table.GetTableId())) {
+			// created on the branch: every row is an insert
+			return;
+		}
+		auto fork_entry = DuckLakeBranchManager::GetMainEntry(branch_transaction, fork_snapshot, table.GetTableId(),
+		                                                      CatalogType::TABLE_ENTRY);
+		if (!fork_entry) {
+			throw InternalException("A table of main the branch reads does not exist at its fork");
+		}
+		result.fork_table_name = fork_entry->name.GetIdentifierName();
 		main_table_id = table.GetTableId();
 	});
 	// how the merge treats rows main changed too since the fork
 	auto head = transaction.GetSnapshot();
 	result.head_snapshot_id = head.snapshot_id;
-	if (head.snapshot_id <= result.fork_snapshot_id) {
+	if (result.fork_table_name.empty() || head.snapshot_id <= result.fork_snapshot_id) {
 		return result;
 	}
 	BoundAtClause fork_clause(Identifier("version"), Value::UBIGINT(result.fork_snapshot_id));
@@ -98,7 +110,7 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	DuckLakeRowMergeTable table;
 	table.table_id = main_table_id;
 	table.schema_name = schema_name;
-	table.main_name = table_name;
+	table.main_name = result.fork_table_name;
 	table.branch_name = table_name;
 	DuckLakeBranchManager::PlanRowMerge(context, result.catalog_name, branch_name, result.fork_snapshot_id,
 	                                    head.snapshot_id, table);
@@ -114,10 +126,13 @@ DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckL
 	    RunBranchSql(*branch_connection, "SELECT rowid, * FROM " +
 	                                         BranchTableSql(data.catalog_name, data.schema_name, data.table_name) +
 	                                         " ORDER BY rowid"));
+	if (data.fork_table_name.empty()) {
+		return;
+	}
 	main_connection = make_uniq<Connection>(*context.db);
 	fork_rows.Start(RunBranchSql(
 	    *main_connection, StringUtil::Format("SELECT rowid, * FROM %s AT (VERSION => %d) ORDER BY rowid",
-	                                         BranchTableSql(data.catalog_name, data.schema_name, data.table_name),
+	                                         BranchTableSql(data.catalog_name, data.schema_name, data.fork_table_name),
 	                                         data.fork_snapshot_id)));
 	if (fork_rows.result->ColumnCount() != branch_rows.result->ColumnCount()) {
 		// a branch changes no columns of main's tables
