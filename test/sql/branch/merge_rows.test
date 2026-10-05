@@ -139,6 +139,19 @@ UPDATE inlined SET price = 20 WHERE item = 'b'
 statement ok
 DELETE FROM inlined WHERE item = 'a'
 
+# every table merges
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'b', dry_run => true) ORDER BY table_name
+----
+both_deleted	ok
+branch_rewrite	ok
+delete_insert	ok
+inlined	ok
+insert_delete	ok
+main_rewrite	ok
+other_rows	ok
+same_value	ok
+
 statement ok
 SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
 

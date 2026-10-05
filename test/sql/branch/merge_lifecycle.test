@@ -157,7 +157,7 @@ SELECT SUM(i) FROM t
 statement ok
 CALL ducklake.set_option('require_commit_message', false)
 
-# a read-only attach can read a branch, but not change branches or merge
+# a read-only attach can read a branch and run the dry run, but not change branches or merge
 statement ok
 CREATE BRANCH ro
 
@@ -196,6 +196,11 @@ statement error
 DROP BRANCH ro
 ----
 attached read-write
+
+query III
+SELECT table_name, status, rows_inserted FROM ducklake_merge_branch('ducklake', 'ro', dry_run => true)
+----
+t	ok	1
 
 statement ok
 SET BRANCH ro

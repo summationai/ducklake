@@ -97,6 +97,9 @@ statement ok
 SET VARIABLE missing_main_file = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_main_file')
 
 statement ok
+SET VARIABLE missing_table = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_table')
+
+statement ok
 SET VARIABLE two_branch_deletes = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'two_branch_deletes')
 
 statement ok
@@ -119,6 +122,11 @@ references data file 999999, which is no longer visible
 
 statement ok
 SET BRANCH main
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'missing_main_file', dry_run => true)
+----
+references data file 999999
 
 # a branch delete on a branch data file that does not exist
 statement ok
@@ -160,6 +168,15 @@ has more than one active delete file
 
 statement ok
 SET BRANCH main
+
+# a branch data file of a table that does not exist
+statement ok
+UPDATE ducklake_meta.ducklake_branching_data_file SET table_id = 999999 WHERE branch_id = getvariable('missing_table')
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'missing_table', dry_run => true)
+----
+changed table 999999, which does not exist at its fork
 
 # a branch delete file filed under a table that does not exist
 statement ok
