@@ -9,6 +9,7 @@
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
+#include "storage/ducklake_transaction_changes.hpp"
 #include "storage/ducklake_transaction_state.hpp"
 
 namespace duckdb {
@@ -36,10 +37,19 @@ bool DuckLakeBranchManager::IsOnBranch(DuckLakeTransaction &transaction) {
 	return state && state->branch_id.IsValid();
 }
 
+bool DuckLakeBranchManager::IsMergingBranch(DuckLakeTransaction &transaction) {
+	auto state = GetState(transaction);
+	return state && state->merge;
+}
+
 void DuckLakeBranchManager::SetBranch(DuckLakeTransaction &transaction, idx_t branch_id, string branch_name) {
 	auto &state = GetOrCreateState(transaction);
 	state.branch_id = branch_id;
 	state.branch_name = std::move(branch_name);
+}
+
+void DuckLakeBranchManager::SetBranchMerge(DuckLakeTransaction &transaction, unique_ptr<DuckLakeBranchMerge> merge) {
+	GetOrCreateState(transaction).merge = std::move(merge);
 }
 
 void DuckLakeBranchManager::EnsureNotOnBranch(DuckLakeTransaction &transaction, const string &operation) {
@@ -163,7 +173,7 @@ DuckLakeSnapshot DuckLakeBranchManager::GetBranchSnapshot(DuckLakeTransaction &t
 }
 
 //===--------------------------------------------------------------------===//
-// Committing a branch transaction
+// Committing a branch transaction or a merge
 //===--------------------------------------------------------------------===//
 void DuckLakeBranchManager::CommitToBranch(DuckLakeTransaction &transaction) {
 	auto &state = *GetState(transaction);
@@ -181,9 +191,98 @@ void DuckLakeBranchManager::CommitToBranch(DuckLakeTransaction &transaction) {
 	CommitBranch(transaction, *state.loaded_branch);
 }
 
+string DuckLakeBranchManager::ChangesFingerprint(DuckLakeTransaction &transaction) {
+	auto &state = GetTransactionState(transaction);
+	auto result = StringUtil::Format("%d/%d/%d/%d/%d/%d", state.SchemaChangesMade(), state.dropped_files.size(),
+	                                 state.flushed_inlined_tables.size(), transaction.new_name_maps.name_maps.size(),
+	                                 state.tables_deleted_from.size(), state.tables_delete_attempted.size());
+	for (auto &entry : state.local_changes.Changes()) {
+		auto &changes = entry.GetTableChanges();
+		idx_t delete_files = 0;
+		for (auto &file : changes.new_delete_files) {
+			delete_files += file.second.size();
+		}
+		idx_t inlined_deletes = 0;
+		for (auto &deletes : changes.new_inlined_data_deletes) {
+			inlined_deletes += deletes.second->rows.size();
+		}
+		idx_t inlined_rows = 0;
+		if (changes.new_inlined_data) {
+			auto &inlined = *changes.new_inlined_data;
+			inlined_rows = inlined.data ? inlined.data->Count() : inlined.external_row_count;
+		}
+		result += StringUtil::Format(";%d:%d/%d/%d/%d/%d/%d", entry.GetTableIndex().index,
+		                             changes.new_data_files.size(), delete_files, inlined_rows, inlined_deletes,
+		                             changes.new_inlined_file_deletes ? 1 : 0, changes.compactions.size());
+	}
+	return result;
+}
+
+void DuckLakeBranchManager::CommitMerge(DuckLakeTransaction &transaction) {
+	auto &merge = *GetState(transaction)->merge;
+	if (ChangesFingerprint(transaction) != merge.changes_fingerprint) {
+		// the statement changed more after the merge was prepared - a failed commit never reaches Rollback
+		auto &connection = transaction.connection;
+		if (connection && connection->context->transaction.HasActiveTransaction()) {
+			connection->Rollback();
+		}
+		GetTransactionState(transaction).CleanupFiles();
+		throw InvalidInputException("MERGE BRANCH must be the only change in its transaction");
+	}
+	if (transaction.ChangesMade()) {
+		auto retry_config = DuckLakeRetryConfig::FromContext(*transaction.context.lock());
+		auto transaction_changes = transaction.GetTransactionChanges();
+		transaction.RunCommitLoop(merge.fork_snapshot, transaction_changes, retry_config);
+		return;
+	}
+	// the branch changed nothing - only record that it was merged
+	auto &metadata_connection = transaction.GetConnection();
+	auto result = transaction.GetMetadataManager().Execute(MergeBookkeepingSql(transaction, merge, false));
+	if (result->HasError()) {
+		metadata_connection.Rollback();
+		result->GetErrorObject().Throw(
+		    StringUtil::Format("Failed to merge branch \"%s\" - retry: ", merge.loaded.info.name));
+	}
+	metadata_connection.Commit();
+}
+
 //===--------------------------------------------------------------------===//
 // Local changes of a branch transaction
 //===--------------------------------------------------------------------===//
+void DuckLakeBranchManager::ForgetFile(DuckLakeTransaction &transaction, TableIndex table_id, const string &path) {
+	auto &local_changes = GetTransactionState(transaction).local_changes;
+	lock_guard<mutex> guard(local_changes.lock);
+	auto entry = local_changes.changes.find(table_id);
+	if (entry == local_changes.changes.end()) {
+		throw InternalException("ForgetFile called for a table without transaction-local files");
+	}
+	auto &table_files = entry->second.new_data_files;
+	for (idx_t i = 0; i < table_files.size(); i++) {
+		if (table_files[i].file_name == path) {
+			table_files.erase_at(i);
+			if (entry->second.IsEmpty()) {
+				local_changes.changes.erase(entry);
+			}
+			return;
+		}
+	}
+	throw InternalException("ForgetFile could not find the transaction-local file");
+}
+
+void DuckLakeBranchManager::ForgetDeleteFiles(DuckLakeTransaction &transaction, TableIndex table_id,
+                                              const string &data_file_path) {
+	auto &local_changes = GetTransactionState(transaction).local_changes;
+	lock_guard<mutex> guard(local_changes.lock);
+	auto entry = local_changes.changes.find(table_id);
+	if (entry == local_changes.changes.end()) {
+		return;
+	}
+	entry->second.new_delete_files.erase(data_file_path);
+	if (entry->second.IsEmpty()) {
+		local_changes.changes.erase(entry);
+	}
+}
+
 bool DuckLakeBranchManager::IsLoadedBranchFile(DuckLakeTransaction &transaction, TableIndex table_id,
                                                const string &path) {
 	auto &local_changes = GetTransactionState(transaction).local_changes;
