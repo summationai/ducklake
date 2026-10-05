@@ -1,4 +1,5 @@
 #include "ducklake_extension.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -124,6 +125,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register murmur3_32 scalar function for Iceberg-compatible bucket partitioning
 	auto murmur3_func = DuckLakeMurmur3Function();
 	loader.RegisterFunction(murmur3_func);
+
+	DuckLakeBranching::Register(loader, config);
 }
 
 void DucklakeExtension::Load(ExtensionLoader &loader) {

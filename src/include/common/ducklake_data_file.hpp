@@ -55,6 +55,8 @@ struct DuckLakeDeleteFile {
 	//! Optional max_snapshot information for partial deletion files.
 	optional_idx max_snapshot;
 	DeleteFileSource source = DeleteFileSource::REGULAR;
+	//! If the file was created by ducklake in this transaction
+	bool created_by_ducklake = true;
 };
 
 struct DuckLakeDataFile {

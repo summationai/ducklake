@@ -1,4 +1,5 @@
 #include "storage/ducklake_catalog.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_puffin.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
@@ -419,6 +420,9 @@ bool DuckLakeDelete::TryDropFullyDeletedFile(DuckLakeTransaction &transaction, c
 		transaction.DropFile(table.GetTableId(), delete_file.data_file_id, data_file_info.file.path,
 		                     data_file_info.row_count, data_file_info.file.file_size_bytes);
 	} else {
+		if (DuckLakeBranching::KeepsLocalFile(transaction, table.GetTableId(), data_file_info.file.path)) {
+			return false;
+		}
 		transaction.DropTransactionLocalFile(table.GetTableId(), data_file_info.file.path);
 	}
 	return true;
@@ -521,6 +525,10 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	DuckLakeDeleteFile delete_file;
 	delete_file.data_file_path = filename;
 	delete_file.data_file_id = data_file_info.file_id;
+	if (DuckLakeBranching::TryFlushDelete(*this, transaction, context, global_state.written_files, filename,
+	                                      data_file_info, sorted_deletes, delete_file)) {
+		return;
+	}
 	// check if the file already has deletes
 	auto existing_delete_data = delete_map->GetDeleteData(filename);
 

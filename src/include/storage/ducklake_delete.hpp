@@ -192,6 +192,7 @@ public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
 private:
+	friend class DuckLakeBranchManager;
 	void FlushDelete(DuckLakeTransaction &transaction, ClientContext &context, DuckLakeDeleteGlobalState &global_state,
 	                 const string &filename, ColumnDataCollection &deleted_rows) const;
 	void FlushDeleteWithSnapshots(DuckLakeTransaction &transaction, ClientContext &context,

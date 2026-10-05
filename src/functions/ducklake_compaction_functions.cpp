@@ -1,4 +1,5 @@
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "common/ducklake_util.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -297,6 +298,7 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 	// FIXME: pass in the sort_data so that list of files is approximately sorted in the same way
 	// (sorted by the min/max metadata)
 	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot, filter_options);
+	DuckLakeBranching::FilterCompactionCandidates(transaction, type, files);
 
 	// Resolve, per schema_version (cached), whether a file written under it can be rewritten under the latest schema.
 	auto latest_entry = catalog.GetEntryById(transaction, snapshot, table_id);
@@ -842,6 +844,7 @@ unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableFunction
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Compaction");
 	string schema, table;
 	vector<unique_ptr<LogicalOperator>> compactions;
 	uint64_t max_files = NumericLimits<uint64_t>::Maximum() - 1;

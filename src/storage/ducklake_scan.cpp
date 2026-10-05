@@ -1,4 +1,5 @@
 #include "storage/ducklake_scan.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/database.hpp"
@@ -285,7 +286,8 @@ bool DuckLakeFunctionInfo::CanUseGlobalStats() {
 	}
 	auto active_transaction = GetTransaction();
 	return snapshot.snapshot_id == active_transaction->GetSnapshot().snapshot_id &&
-	       !active_transaction->GetCatalog().CatalogSnapshot();
+	       !active_transaction->GetCatalog().CatalogSnapshot() &&
+	       DuckLakeBranching::CanUseGlobalStats(*active_transaction);
 }
 
 void DuckLakeScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,

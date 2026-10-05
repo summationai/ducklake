@@ -1,4 +1,5 @@
 #include "common/ducklake_util.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -617,6 +618,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Flushing inlined data");
 
 	auto &named_parameters = input.named_parameters;
 
@@ -676,6 +678,9 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 			auto &table = table_ref.get();
 			auto &inlined_tables = table.GetInlinedDataTables();
 			for (auto &inlined_table : inlined_tables) {
+				if (DuckLakeBranching::IsInlinedTablePinned(transaction, inlined_table)) {
+					continue;
+				}
 				DuckLakeDataFlusher compactor(context, ducklake_catalog, transaction, *input.binder, table.GetTableId(),
 				                              inlined_table);
 				flushes.push_back(compactor.GenerateFlushCommand());

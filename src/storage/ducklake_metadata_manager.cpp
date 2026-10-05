@@ -1,4 +1,5 @@
 #include "storage/ducklake_metadata_manager.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/path.hpp"
 #include "functions/ducklake_table_functions.hpp"
@@ -5533,6 +5534,7 @@ vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOrphanFilesForCleanup
 	for (auto &row : *known_files_res) {
 		known_files.insert(canonical_path(row.GetValue<string>(0)));
 	}
+	DuckLakeBranching::AddKnownFiles(transaction, known_files, canonical_path);
 
 	auto query = StringUtil::Format(R"(SELECT filename
 FROM read_blob({DATA_PATH} || '**') files

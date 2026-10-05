@@ -1,3 +1,4 @@
+add_subdirectory(branching)
 add_subdirectory(common)
 add_subdirectory(functions)
 add_subdirectory(metadata_manager)

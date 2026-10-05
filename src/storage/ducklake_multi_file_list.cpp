@@ -1,4 +1,5 @@
 #include "common/ducklake_util.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
@@ -649,6 +650,7 @@ void DuckLakeMultiFileList::GetFilesForTable() const {
 	// if the transaction has any local deletes - apply them to the file list
 	if (transaction.HasLocalDeletes(read_info.table_id)) {
 		for (auto &file_entry : files) {
+			DuckLakeBranching::PrepareLocalDelete(transaction, read_info.table_id, file_entry);
 			transaction.GetLocalDeleteForFile(read_info.table_id, file_entry.file.path, file_entry.delete_file);
 		}
 	}
