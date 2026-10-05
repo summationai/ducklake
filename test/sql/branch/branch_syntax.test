@@ -1,0 +1,109 @@
+# name: test/sql/branch/branch_syntax.test
+# description: the branch statements' syntax, and statements the branch parser leaves to DuckDB
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_syntax_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+# comments anywhere in the statement, single-quoted names with an escaped quote
+statement ok
+CREATE /* a note */ BRANCH 'it''s' -- the name has a quote
+
+query I
+SELECT branch_name FROM ducklake_branches('ducklake')
+----
+it's
+
+statement ok
+SET BRANCH 'it''s'
+
+query I
+SELECT branch_name FROM ducklake_current_branch('ducklake')
+----
+it's
+
+statement ok
+SET BRANCH main
+
+statement ok
+CREATE BRANCH b FROM main
+
+statement ok
+DROP BRANCH IF EXISTS b
+
+# incomplete statements
+statement error
+CREATE BRANCH 123
+----
+Expected a branch name
+
+statement error
+CREATE BRANCH x FROM
+----
+Expected a branch name after FROM
+
+statement error
+DROP BRANCH IF x
+----
+Expected EXISTS after IF
+
+statement error
+DROP BRANCH
+----
+Expected a branch name
+
+statement error
+SET BRANCH
+----
+Expected a branch name
+
+# statements that are not branch statements stay DuckDB's syntax errors
+statement error
+CREATE NOTHING x
+----
+syntax error
+
+statement error
+DROP NOTHING x
+----
+syntax error
+
+statement error
+SET x y z
+----
+syntax error
+
+statement error
+MERGE x
+----
+syntax error
+
+statement error
+CREATE
+----
+syntax error
+
+statement error
+NOTHING AT ALL
+----
+syntax error
+
+# the branch is still there after the failed statements
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+1

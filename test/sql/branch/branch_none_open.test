@@ -1,0 +1,116 @@
+# name: test/sql/branch/branch_none_open.test
+# description: maintenance on main when the lake never had a branch, and when all its branches are closed
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_none_open_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, table_name => 't')
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+INSERT INTO t SELECT range FROM range(100, 120)
+
+statement ok
+INSERT INTO t SELECT range FROM range(200, 220)
+
+# a lake that never had a branch has no branch tables, and maintenance works as before
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+statement ok
+CALL ducklake_delete_orphaned_files('ducklake', cleanup_all => true)
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+1
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+0
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+41	6381
+
+# a lake whose branches are all dropped: the tables exist, nothing is pinned
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO t SELECT range FROM range(300, 320)
+
+statement ok
+SET BRANCH main
+
+statement ok
+DROP BRANCH b
+
+statement ok
+CREATE BRANCH d
+
+statement ok
+DROP BRANCH d
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+INSERT INTO t SELECT range FROM range(400, 420)
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+statement ok
+CALL ducklake_delete_orphaned_files('ducklake', cleanup_all => true)
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+1
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+62	14573
