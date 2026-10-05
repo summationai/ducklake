@@ -1,5 +1,6 @@
 #include "storage/ducklake_catalog.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/main/database_manager.hpp"
@@ -1357,7 +1358,7 @@ idx_t DuckLakeCatalog::GetInliningLimit(ClientContext &context, const Identifier
 		                   table_name, obstacle);
 		return 0;
 	}
-	return limit;
+	return DuckLakeBranching::InliningLimit(transaction, limit);
 }
 
 bool DuckLakeCatalog::SortOnInsert(SchemaIndex schema_id, TableIndex table_id,

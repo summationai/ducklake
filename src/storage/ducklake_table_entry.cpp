@@ -1,4 +1,5 @@
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "common/ducklake_types.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -493,7 +494,8 @@ bool DuckLakeTableEntry::AddedColumn(FieldIndex field_index) {
 }
 
 bool DuckLakeTableEntry::CanUseGlobalStats(DuckLakeTransaction &transaction) const {
-	return !IsTransactionLocal() && !transaction.HasTransactionLocalInserts(GetTableId());
+	return !IsTransactionLocal() && DuckLakeBranching::CanUseGlobalStats(transaction) &&
+	       !transaction.HasTransactionLocalInserts(GetTableId());
 }
 
 shared_ptr<DuckLakeTableStats> DuckLakeTableEntry::GetTableStats(DuckLakeTransaction &transaction) {

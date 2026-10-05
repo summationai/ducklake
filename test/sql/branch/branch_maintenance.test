@@ -1,0 +1,135 @@
+# name: test/sql/branch/branch_maintenance.test
+# description: maintenance on main keeps everything an open branch reads at its fork
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_maintenance_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+INSERT INTO t VALUES (3)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+# deleting the only row of a main file drops that file on the branch
+statement ok
+DELETE FROM t WHERE i = 1
+
+statement ok
+INSERT INTO t VALUES (10)
+
+statement ok
+SET BRANCH main
+
+# main keeps changing after the fork
+statement ok
+INSERT INTO t VALUES (4)
+
+statement ok
+INSERT INTO t VALUES (5)
+
+# expire keeps the fork snapshot
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake') WHERE snapshot_id = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake'))
+----
+1
+
+# merging adjacent files leaves the files visible at the fork alone
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file WHERE begin_snapshot <= (SELECT fork_snapshot_id FROM ducklake_branches('ducklake'))
+----
+3
+
+# rewriting files with deletes is not held back, and the branch still reads its fork
+statement ok
+CALL ducklake_rewrite_data_files('ducklake')
+
+# orphan cleanup keeps the branch's files
+statement ok
+CALL ducklake_delete_orphaned_files('ducklake', cleanup_all => true)
+
+statement ok
+SET BRANCH b
+
+query I
+SELECT i FROM t ORDER BY i
+----
+2
+3
+10
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT i FROM t ORDER BY i
+----
+1
+2
+3
+4
+5
+
+# dropping the branch queues its files for deletion
+statement ok
+DROP BRANCH b
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904
+----
+1
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+0
+
+# with no open branch, compaction merges everything again
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file WHERE end_snapshot IS NULL
+----
+1
+
+query I
+SELECT i FROM t ORDER BY i
+----
+1
+2
+3
+4
+5

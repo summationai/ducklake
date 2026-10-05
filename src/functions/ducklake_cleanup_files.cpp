@@ -1,4 +1,5 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/file_system.hpp"
 
@@ -85,6 +86,7 @@ static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctio
 		    DuckLakeTableFunctionUtil::FormatTimestampOlderThan("delete_older_than", older_than_default);
 	}
 
+	DuckLakeBranching::EnsureNotOnBranch(DuckLakeTransaction::Get(context, ducklake_catalog), "File cleanup");
 	// orphans belong to no table, so only the global auto_compact option can turn their cleanup off
 	bool skip_cleanup = type == CleanupType::ORPHANED_FILES && !ducklake_catalog.AutoCompactEnabled();
 	if (!skip_cleanup) {
