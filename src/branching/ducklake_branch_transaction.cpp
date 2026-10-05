@@ -232,6 +232,9 @@ void DuckLakeBranchManager::CommitMerge(DuckLakeTransaction &transaction) {
 	if (transaction.ChangesMade()) {
 		auto retry_config = DuckLakeRetryConfig::FromContext(*transaction.context.lock());
 		auto transaction_changes = transaction.GetTransactionChanges();
+		for (auto &table : merge.row_merge) {
+			ExcludeFromInsertDeleteRules(table.first, transaction_changes);
+		}
 		transaction.RunCommitLoop(merge.fork_snapshot, transaction_changes, retry_config);
 		return;
 	}
