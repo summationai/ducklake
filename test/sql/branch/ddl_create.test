@@ -1,0 +1,360 @@
+# name: test/sql/branch/ddl_create.test
+# description: schemas, tables and views created on a branch, read by later transactions and after a restart
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_create_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2), (3)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+# every statement below is its own transaction: each one loads what the earlier ones committed to the branch
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE s.all_types(i INTEGER NOT NULL, big BIGINT DEFAULT 42, d DECIMAL(18,3), dt DATE, ts TIMESTAMP, flag BOOLEAN, dbl DOUBLE, bin BLOB, txt VARCHAR DEFAULT 'none', expr VARCHAR DEFAULT concat('a', 'b'), st STRUCT(a INTEGER, b VARCHAR), lst INTEGER[], mp MAP(VARCHAR, INTEGER), nested STRUCT(x INTEGER[], y STRUCT(z DOUBLE)))
+
+statement ok
+INSERT INTO s.all_types (i, d, dt, ts, flag, dbl, bin, st, lst, mp, nested) VALUES (1, 1.5, DATE '2024-01-02', TIMESTAMP '2024-01-02 03:04:05', true, 2.5, '\xAB'::BLOB, {'a': 1, 'b': 'x'}, [1, 2], MAP {'k': 1}, {'x': [3], 'y': {'z': 4.5}})
+
+statement error
+INSERT INTO s.all_types (i) VALUES (NULL)
+----
+NOT NULL constraint failed
+
+statement ok
+CREATE TABLE tens AS SELECT i * 10 AS j FROM t
+
+statement ok
+CREATE VIEW s.big_tens AS SELECT j FROM tens WHERE j > 10
+
+statement ok
+CREATE TABLE IF NOT EXISTS tens(other INTEGER)
+
+statement ok
+CREATE TABLE IF NOT EXISTS s.extra(k INTEGER)
+
+statement ok
+CREATE VIEW IF NOT EXISTS s.big_tens AS SELECT 1
+
+statement error
+CREATE TABLE tens(other INTEGER)
+----
+already exists
+
+statement error
+CREATE SCHEMA s
+----
+already exists
+
+query IIIIIIIIIIIIII
+FROM s.all_types
+----
+1	42	1.500	2024-01-02	2024-01-02 03:04:05	true	2.5	\xAB	none	ab	{'a': 1, 'b': x}	[1, 2]	{k=1}	{'x': [3], 'y': {'z': 4.5}}
+
+query I
+SELECT j FROM tens ORDER BY j
+----
+10
+20
+30
+
+query I
+FROM s.big_tens ORDER BY ALL
+----
+20
+30
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	t
+main	tens
+s	all_types
+s	extra
+
+query II
+SELECT schema_name, view_name FROM duckdb_views() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+s	big_tens
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main
+s
+
+# DML on a branch table across commits
+statement ok
+INSERT INTO tens VALUES (40)
+
+statement ok
+DELETE FROM tens WHERE j = 10
+
+statement ok
+UPDATE tens SET j = j + 1 WHERE j = 20
+
+query I
+SELECT j FROM tens ORDER BY j
+----
+21
+30
+40
+
+# a transaction's first statement resolves a schema and a table the branch created
+statement ok
+BEGIN
+
+query I
+SELECT COUNT(*) FROM s.big_tens
+----
+3
+
+statement ok
+CREATE TABLE s.in_transaction(v VARCHAR)
+
+statement ok
+INSERT INTO s.in_transaction VALUES ('a'), ('b')
+
+query I
+SELECT COUNT(*) FROM s.in_transaction
+----
+2
+
+statement ok
+COMMIT
+
+statement ok
+BEGIN
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 's' ORDER BY ALL
+----
+s	all_types
+s	extra
+s	in_transaction
+
+statement ok
+ROLLBACK
+
+# a rolled back transaction leaves nothing behind
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE gone AS SELECT 1 AS x
+
+statement ok
+ROLLBACK
+
+statement error
+SELECT * FROM gone
+----
+does not exist
+
+# main sees none of it
+statement ok
+SET BRANCH main
+
+statement error
+SELECT * FROM tens
+----
+does not exist
+
+statement error
+SELECT * FROM s.all_types
+----
+does not exist
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main
+
+# every catalog change is a branch commit
+query T
+SELECT string_agg(split_part(change, ':', 1), ',' ORDER BY commit_seq) FROM (SELECT commit_seq, unnest(string_split(changes_made, ',')) AS change FROM ducklake_meta.ducklake_branching_commit)
+----
+created_schema,created_table,inserted_into_table,inserted_into_table,created_table,created_view,created_table,inserted_into_table,deleted_from_table,inserted_into_table,deleted_from_table,inserted_into_table,created_table
+
+# a restart reads the branch from its metadata
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_create_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH b
+
+query TTTT
+SELECT column_name, column_type, "null", "default" FROM (DESCRIBE s.all_types)
+----
+i	INTEGER	NO	NULL
+big	BIGINT	YES	'42'
+d	DECIMAL(18,3)	YES	NULL
+dt	DATE	YES	NULL
+ts	TIMESTAMP	YES	NULL
+flag	BOOLEAN	YES	NULL
+dbl	DOUBLE	YES	NULL
+bin	BLOB	YES	NULL
+txt	VARCHAR	YES	'none'
+expr	VARCHAR	YES	concat('a', 'b')
+st	STRUCT(a INTEGER, b VARCHAR)	YES	NULL
+lst	INTEGER[]	YES	NULL
+mp	MAP(VARCHAR, INTEGER)	YES	NULL
+nested	STRUCT(x INTEGER[], y STRUCT(z DOUBLE))	YES	NULL
+
+statement ok
+INSERT INTO s.all_types (i) VALUES (2)
+
+query IIIII
+SELECT i, big, txt, expr, st FROM s.all_types ORDER BY i
+----
+1	42	none	ab	{'a': 1, 'b': x}
+2	42	none	ab	NULL
+
+query I
+SELECT j FROM tens ORDER BY j
+----
+21
+30
+40
+
+query I
+FROM s.big_tens ORDER BY ALL
+----
+21
+30
+40
+
+query I
+SELECT v FROM s.in_transaction ORDER BY v
+----
+a
+b
+
+# the branch's own tables keep their column ids
+query IT
+SELECT column_id, column_name FROM ducklake_meta.ducklake_branching_column WHERE object_id = (SELECT object_id FROM ducklake_meta.ducklake_branching_object WHERE object_name = 'all_types') AND parent_column IS NULL ORDER BY column_order
+----
+1	i
+2	big
+3	d
+4	dt
+5	ts
+6	flag
+7	dbl
+8	bin
+9	txt
+10	expr
+11	st
+14	lst
+16	mp
+19	nested
+
+# a branch writes its files under the paths of the objects it created
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_data_file WHERE path LIKE 's/all_types/%'
+----
+2
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT SUM(i) FROM t
+----
+6
+
+# nested schemas, on a lake with 1.1 metadata: under a schema of main and under one the branch created
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/ddl_create_nested_files', METADATA_CATALOG 'nested_meta')
+
+statement ok
+CREATE SCHEMA nested.outer_s
+
+statement ok
+CALL ducklake_create_branch('nested', 'nb')
+
+statement ok
+CALL ducklake_set_branch('nested', 'nb')
+
+statement ok
+CREATE SCHEMA nested.outer_s.inner_s
+
+statement ok
+CREATE SCHEMA nested.mine
+
+statement ok
+CREATE SCHEMA nested.mine.deeper
+
+statement ok
+CREATE TABLE nested.mine.deeper.answers AS SELECT 42 AS answer
+
+statement ok
+CREATE TABLE nested.outer_s.inner_s.u(x INTEGER)
+
+statement ok
+INSERT INTO nested.outer_s.inner_s.u VALUES (7)
+
+statement ok
+DETACH nested
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/ddl_create_nested_files', METADATA_CATALOG 'nested_meta')
+
+statement ok
+CALL ducklake_set_branch('nested', 'nb')
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'nested' ORDER BY ALL
+----
+deeper	answers
+inner_s	u
+
+query I
+FROM nested.mine.deeper.answers
+----
+42
+
+query I
+FROM nested.outer_s.inner_s.u
+----
+7
+
+statement ok
+CALL ducklake_set_branch('nested', 'main')
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'nested' ORDER BY ALL
+----
+main
+outer_s

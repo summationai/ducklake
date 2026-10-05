@@ -45,6 +45,9 @@ SnapshotChangeInformation DuckLakeBranchManager::MainChangesSince(DuckLakeTransa
 set<TableIndex> DuckLakeBranchManager::RenamedOnMain(DuckLakeTransaction &transaction, bool views,
                                                      const set<TableIndex> &ids, idx_t fork_snapshot_id) {
 	set<TableIndex> result;
+	if (ids.empty()) {
+		return result;
+	}
 	auto table = views ? "ducklake_view" : "ducklake_table";
 	auto id_column = views ? "view_id" : "table_id";
 	vector<idx_t> id_values;
@@ -84,6 +87,10 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 	set<TableIndex> branch_tables, branch_deleted, branch_deleted_inlined;
 	for (auto &entry : state.local_changes.Changes()) {
 		auto table_id = entry.GetTableIndex();
+		if (IsTransactionLocal(table_id)) {
+			// a table the branch created: main has no rows of it
+			continue;
+		}
 		auto &changes = entry.GetTableChanges();
 		branch_tables.insert(table_id);
 		if (!changes.new_delete_files.empty()) {
@@ -109,7 +116,8 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		if ((!main_inserted && !main_deleted) || (!deleted && !main_deleted)) {
 			continue;
 		}
-		if (KeepsTableLevelRules(table_id, deleted, Contains(branch_deleted_inlined, table_id), main_changes)) {
+		if (Contains(state.dropped_tables, table_id) ||
+		    KeepsTableLevelRules(table_id, deleted, Contains(branch_deleted_inlined, table_id), main_changes)) {
 			continue;
 		}
 		candidates.insert(table_id);
@@ -121,7 +129,7 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 	auto renamed_on_main = RenamedOnMain(transaction, false, candidates, fork_snapshot.snapshot_id);
 	auto head = transaction.GetSnapshot();
 	for (auto &table_id : candidates) {
-		auto entry = transaction.GetCatalog().GetEntryById(transaction, head, table_id);
+		auto entry = GetTableEntry(transaction, head, table_id);
 		if (Contains(renamed_on_main, table_id) || !entry) {
 			continue;
 		}
@@ -135,6 +143,15 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		table.schema_name = schema.name.GetIdentifierName();
 		table.main_name = entry->name.GetIdentifierName();
 		table.branch_name = table.main_name;
+		// a table renamed on the branch is read there under its new name
+		for (auto &schema_entry : state.new_tables) {
+			for (auto &local : schema_entry.second->GetEntries()) {
+				if (local.second->type == CatalogType::TABLE_ENTRY &&
+				    local.second->Cast<DuckLakeTableEntry>().GetTableId() == table_id) {
+					table.branch_name = local.second->name.GetIdentifierName();
+				}
+			}
+		}
 		result.emplace(table_id, std::move(table));
 	}
 	return result;
@@ -293,7 +310,7 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 		if (!table.conflicts.empty()) {
 			throw TransactionException(RowConflictMessage(merge.loaded.info.name, table));
 		}
-		auto table_entry = transaction.GetCatalog().GetEntryById(transaction, merge.head_snapshot, table.table_id);
+		auto table_entry = GetTableEntry(transaction, merge.head_snapshot, table.table_id);
 		auto &table_data = table_entry->Cast<DuckLakeTableEntry>();
 		auto &schema = table_data.ParentSchema().Cast<DuckLakeSchemaEntry>();
 		bool use_deletion_vectors =
