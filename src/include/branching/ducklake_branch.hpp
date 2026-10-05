@@ -143,6 +143,25 @@ struct DuckLakeBranchTransactionState {
 	unique_ptr<DuckLakeBranchMerge> merge;
 };
 
+//! What merging a branch would do to one table
+struct DuckLakeMergePreviewEntry {
+	TableIndex table_id;
+	string schema_name;
+	string table_name;
+	//! Rows the merge adds to main (the branch's files, minus rows it deleted from them again)
+	idx_t rows_inserted = 0;
+	//! Rows the merge removes from main
+	idx_t rows_deleted = 0;
+	//! Branch data files main takes over
+	idx_t files_added = 0;
+	//! What the branch did to the table, in the terms of ducklake_snapshots
+	vector<string> branch_changes;
+	//! What main did to the table since the fork
+	vector<string> main_changes;
+	//! The error the merge would fail with; empty when the table merges
+	string conflict;
+};
+
 class DuckLakeBranchManager {
 public:
 	//! Branch file ids live above every id main hands out: BASE + branch_id * 2^32 + per-branch sequence
@@ -171,6 +190,10 @@ public:
 	//! Runs with every conflict check of a merge commit
 	static void CheckMerge(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
 	                       const SnapshotChangeInformation &other_changes);
+	//! Reports what MERGE BRANCH would do, table by table, without changing anything
+	static vector<DuckLakeMergePreviewEntry> PreviewMerge(DuckLakeTransaction &transaction, const string &name);
+	//! Removes a loaded branch from the transaction again; only valid when the transaction had no changes before
+	static void DiscardLoadedBranch(DuckLakeTransaction &transaction);
 	//! The SQL that records the merge; part of the merge commit's batch
 	static string MergeBookkeepingSql(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
 	                                  bool with_snapshot);
