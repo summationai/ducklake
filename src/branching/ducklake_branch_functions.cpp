@@ -35,6 +35,8 @@ struct DuckLakeBranchFunctionData : public TableFunctionData {
 	string branch_name;
 	string source_branch;
 	bool if_exists = false;
+	//! Author and message given to MERGE BRANCH
+	unique_ptr<DuckLakeSnapshotCommit> commit_info;
 };
 
 struct DuckLakeBranchFunctionState : public GlobalTableFunctionState {
@@ -190,6 +192,59 @@ static void SetBranchExecute(ClientContext &context, TableFunctionInput &data_p,
 TableFunction DuckLakeBranchFunctions::GetSetBranchFunction() {
 	return TableFunction("ducklake_set_branch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, SetBranchExecute,
 	                     SetBranchBind, DuckLakeBranchFunctionInit);
+}
+
+//===--------------------------------------------------------------------===//
+// ducklake_merge_branch
+//===--------------------------------------------------------------------===//
+static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = BindBranchFunction(context, input);
+	auto author = input.named_parameters.find("author");
+	auto message = input.named_parameters.find("message");
+	if (author != input.named_parameters.end() || message != input.named_parameters.end()) {
+		result->commit_info = make_uniq<DuckLakeSnapshotCommit>();
+		if (author != input.named_parameters.end()) {
+			result->commit_info->author = author->second;
+		}
+		if (message != input.named_parameters.end()) {
+			result->commit_info->commit_message = message->second;
+			result->commit_info->is_commit_info_set = true;
+		}
+	}
+	names.emplace_back("branch_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("fork_snapshot_id");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("branch_commits");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	return std::move(result);
+}
+
+static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = data_p.global_state->Cast<DuckLakeBranchFunctionState>();
+	auto &data = data_p.bind_data->Cast<DuckLakeBranchFunctionData>();
+	if (state.finished) {
+		return;
+	}
+	DuckLakeBranchManager::EnsureAutoCommit(context, "MERGE BRANCH");
+	EnsureWritable(data.catalog, "MERGE BRANCH");
+	auto &transaction = DuckLakeTransaction::Get(context, data.catalog);
+	// the statement's own commit performs the merge
+	auto branch = DuckLakeBranchManager::PrepareMerge(transaction, data.branch_name, data.commit_info.get());
+	output.data[0].Append(Value(branch.name));
+	output.data[1].Append(Value::UBIGINT(branch.fork_snapshot_id));
+	output.data[2].Append(Value::UBIGINT(branch.head_seq));
+	output.SetChildCardinality(1);
+	state.finished = true;
+}
+
+TableFunction DuckLakeBranchFunctions::GetMergeBranchFunction() {
+	TableFunction function("ducklake_merge_branch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MergeBranchExecute,
+	                       MergeBranchBind, DuckLakeBranchFunctionInit);
+	function.named_parameters["author"] = LogicalType::VARCHAR;
+	function.named_parameters["message"] = LogicalType::VARCHAR;
+	return function;
 }
 
 //===--------------------------------------------------------------------===//

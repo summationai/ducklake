@@ -30,6 +30,8 @@ struct DuckLakeCommitContext;
 struct DuckLakeDeleteFile;
 struct DuckLakeFileListExtendedEntry;
 struct DuckLakeInlinedTableInfo;
+struct DuckLakeSnapshotCommit;
+struct SnapshotChangeInformation;
 class DuckLakeDelete;
 
 struct DuckLakeBranchInfo {
@@ -78,6 +80,24 @@ struct DuckLakeLoadedBranch {
 	map<TableIndex, map<string, set<idx_t>>> inlined_deletes;
 	//! Main data files dropped on the branch (data file id -> table)
 	map<idx_t, TableIndex> dropped_files;
+	//! A main data file the branch deleted from, with the branch's delete file for it
+	struct MainDelete {
+		TableIndex table_id;
+		idx_t data_file_id;
+		string data_file_path;
+		string branch_delete_file;
+	};
+	vector<MainDelete> main_deletes;
+};
+
+//! A branch being merged into main by the current transaction
+struct DuckLakeBranchMerge {
+	DuckLakeLoadedBranch loaded;
+	DuckLakeSnapshot fork_snapshot;
+	//! Branch files main does not take over: (branch file id, full path), scheduled for deletion by the merge
+	vector<pair<idx_t, string>> files_to_schedule;
+	//! The transaction's changes once the merge was prepared - nothing may be added before it commits
+	string changes_fingerprint;
 };
 
 //! Branch state of one DuckLake transaction, held by the transaction as an opaque pointer
@@ -91,6 +111,8 @@ struct DuckLakeBranchTransactionState {
 	//! The fork snapshot while the branch is being loaded, for re-entrant snapshot lookups
 	unique_ptr<DuckLakeSnapshot> loading_fork_snapshot;
 	std::thread::id loading_thread;
+	//! The branch the transaction merges into main on commit (if any)
+	unique_ptr<DuckLakeBranchMerge> merge;
 };
 
 class DuckLakeBranchManager {
@@ -112,9 +134,20 @@ public:
 	static DuckLakeBranchInfo CreateBranch(DuckLakeTransaction &transaction, const string &name);
 	static void DropBranch(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch);
 
-	//! Loads the branch head into the transaction's local changes
+	//! Loads the branch head into the transaction's local changes; a merge also needs stats and partition values
 	static void LoadBranch(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch,
-	                       DuckLakeSnapshot fork_snapshot, DuckLakeLoadedBranch &loaded);
+	                       DuckLakeSnapshot fork_snapshot, DuckLakeLoadedBranch &loaded, bool for_merge = false);
+	//! Prepares the current main transaction to merge the branch when it commits
+	static DuckLakeBranchInfo PrepareMerge(DuckLakeTransaction &transaction, const string &name,
+	                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info);
+	//! Runs with every conflict check of a merge commit
+	static void CheckMerge(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
+	                       const SnapshotChangeInformation &other_changes);
+	//! The SQL that records the merge; part of the merge commit's batch
+	static string MergeBookkeepingSql(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
+	                                  bool with_snapshot);
+	//! Filter on ducklake_snapshot rows that no active branch needs (its fork and everything after it)
+	static string ExpirableSnapshotFilter();
 	//! Writes the transaction's new local changes as the next branch commit
 	static void CommitBranch(DuckLakeTransaction &transaction, DuckLakeLoadedBranch &loaded);
 
@@ -135,11 +168,20 @@ public:
 	static DuckLakeBranchTransactionState &GetOrCreateState(DuckLakeTransaction &transaction);
 	static DuckLakeTransactionState &GetTransactionState(DuckLakeTransaction &transaction);
 	static bool IsOnBranch(DuckLakeTransaction &transaction);
+	static bool IsMergingBranch(DuckLakeTransaction &transaction);
 	static void SetBranch(DuckLakeTransaction &transaction, idx_t branch_id, string branch_name);
+	static void SetBranchMerge(DuckLakeTransaction &transaction, unique_ptr<DuckLakeBranchMerge> merge);
 	static void EnsureNotOnBranch(DuckLakeTransaction &transaction, const string &operation);
 	//! The fork snapshot of the transaction's branch; loads the branch head on first use
 	static DuckLakeSnapshot GetBranchSnapshot(DuckLakeTransaction &transaction);
 	static void CommitToBranch(DuckLakeTransaction &transaction);
+	static void CommitMerge(DuckLakeTransaction &transaction);
+	//! A summary of everything the transaction changed, to tell whether a statement added changes
+	static string ChangesFingerprint(DuckLakeTransaction &transaction);
+	//! Removes a loaded data file and its delete files from the change set without touching disk
+	static void ForgetFile(DuckLakeTransaction &transaction, TableIndex table_id, const string &path);
+	//! Removes the delete files of a data file from the change set without touching disk
+	static void ForgetDeleteFiles(DuckLakeTransaction &transaction, TableIndex table_id, const string &data_file_path);
 	//! Whether the transaction-local data file was loaded from an earlier branch commit
 	static bool IsLoadedBranchFile(DuckLakeTransaction &transaction, TableIndex table_id, const string &path);
 	//! Writes a delete on a main data file from a branch: main's deletes at the fork plus the branch's deletes
@@ -147,6 +189,10 @@ public:
 	                              unordered_map<string, DuckLakeDeleteFile> &written_files, const string &filename,
 	                              const DuckLakeFileListExtendedEntry &data_file_info, set<idx_t> deletes,
 	                              DuckLakeDeleteFile &delete_file);
+
+private:
+	static void RebaseMainDeletes(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
+	static void DropFullyDeletedBranchFiles(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
 };
 
 } // namespace duckdb

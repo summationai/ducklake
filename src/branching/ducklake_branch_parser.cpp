@@ -8,7 +8,7 @@
 
 namespace duckdb {
 
-enum class DuckLakeBranchStatementType : uint8_t { CREATE_BRANCH, DROP_BRANCH, SET_BRANCH };
+enum class DuckLakeBranchStatementType : uint8_t { CREATE_BRANCH, DROP_BRANCH, SET_BRANCH, MERGE_BRANCH };
 
 struct DuckLakeBranchParseData : public ParserExtensionParseData {
 	DuckLakeBranchStatementType type = DuckLakeBranchStatementType::SET_BRANCH;
@@ -36,6 +36,8 @@ struct DuckLakeBranchParseData : public ParserExtensionParseData {
 			return "CREATE BRANCH " + name + (source_branch.empty() ? string() : " FROM " + Quote(source_branch));
 		case DuckLakeBranchStatementType::DROP_BRANCH:
 			return string("DROP BRANCH ") + (if_exists ? "IF EXISTS " : "") + name;
+		case DuckLakeBranchStatementType::MERGE_BRANCH:
+			return "MERGE BRANCH " + name;
 		default:
 			return "SET BRANCH " + name;
 		}
@@ -156,6 +158,15 @@ static ParserExtensionParseResult DuckLakeBranchParse(ParserExtensionInfo *info,
 		if (!reader.TryConsumeName(data->branch_name)) {
 			return BranchSyntaxError("Expected a branch name - usage: " + usage);
 		}
+	} else if (reader.TryConsumeWord("MERGE")) {
+		if (!reader.TryConsumeWord("BRANCH")) {
+			return ParserExtensionParseResult();
+		}
+		data->type = DuckLakeBranchStatementType::MERGE_BRANCH;
+		usage = "MERGE BRANCH <name>";
+		if (!reader.TryConsumeName(data->branch_name)) {
+			return BranchSyntaxError("Expected a branch name - usage: " + usage);
+		}
 	} else {
 		return ParserExtensionParseResult();
 	}
@@ -182,6 +193,9 @@ static ParserExtensionPlanResult DuckLakeBranchPlan(ParserExtensionInfo *info, C
 			throw NotImplementedException("Creating a branch from another branch is not supported yet");
 		}
 		result.function = DuckLakeBranchFunctions::GetCreateBranchFunction();
+		break;
+	case DuckLakeBranchStatementType::MERGE_BRANCH:
+		result.function = DuckLakeBranchFunctions::GetMergeBranchFunction();
 		break;
 	case DuckLakeBranchStatementType::DROP_BRANCH:
 		result.function = DuckLakeBranchFunctions::GetDropBranchFunction();

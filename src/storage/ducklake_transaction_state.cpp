@@ -2675,6 +2675,9 @@ SnapshotAndStats DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot tr
 	                    &other_changes.tables_merge_adjacent, &other_changes.tables_rewrite_delete}) {
 		tables_changed_by_others.insert(tables->begin(), tables->end());
 	}
+	if (context.pre_commit_check) {
+		context.pre_commit_check(other_changes);
+	}
 
 	return snapshot_and_stats;
 }
@@ -2725,7 +2728,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 		auto attempt_dropped_file_stats = dropped_file_stats;
 		try {
 			can_retry = false;
-			if (i > 0) {
+			if (i > 0 || context.pre_commit_check) {
 				// we failed our first commit due to another transaction committing
 				// retry - but first check for conflicts
 				commit_stats_snapshot = CheckForConflicts(transaction_snapshot, attempt_changes, context);
@@ -2745,6 +2748,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			string batch_queries = DuckLakeMetadataManager::InsertSnapshotSql();
 			batch_queries += CommitChanges(commit_state, attempt_changes, stats, context, attempt_dropped_file_stats);
 			batch_queries += WriteSnapshotChanges(commit_state, attempt_changes, context.commit_info);
+			batch_queries += context.extra_commit_sql;
 			auto res = context.execute_commit_batch(commit_snapshot, batch_queries);
 			if (res->HasError()) {
 				auto &commit_error = res->GetErrorObject();

@@ -1,0 +1,197 @@
+# name: test/sql/branch/merge_basic.test
+# description: merging a branch into main when main did not change since the fork
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_basic_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE prices(item VARCHAR, price INTEGER, info STRUCT(a INTEGER, b VARCHAR))
+
+statement ok
+INSERT INTO prices VALUES ('Jacket', 100, {'a': 1, 'b': 'x'}), ('Boots', 80, {'a': 2, 'b': 'y'}), ('Scarf', 20, {'a': 3, 'b': 'z'})
+
+statement ok
+CREATE TABLE forecast(month INTEGER, revenue INTEGER)
+
+statement ok
+INSERT INTO forecast VALUES (1, 1000), (2, 1100)
+
+# a second file in prices, which the branch deletes completely
+statement ok
+INSERT INTO prices VALUES ('Gloves', 30, {'a': 4, 'b': 'w'})
+
+query II
+CREATE BRANCH analysis
+----
+analysis	5
+
+statement ok
+SET BRANCH analysis
+
+statement ok
+UPDATE prices SET price = 110 WHERE item = 'Jacket'
+
+statement ok
+INSERT INTO prices VALUES ('Hat', 25, {'a': 5, 'b': 'v'})
+
+statement ok
+DELETE FROM prices WHERE item = 'Scarf'
+
+statement ok
+DELETE FROM prices WHERE item = 'Gloves'
+
+statement ok
+UPDATE forecast SET revenue = 1200 WHERE month = 2
+
+statement ok
+SET BRANCH main
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	80
+Gloves	30
+Jacket	100
+Scarf	20
+
+# the only scheduled file is the delete file the branch superseded while it worked
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+1
+
+query III
+MERGE BRANCH analysis
+----
+analysis	5	5
+
+# main now holds the branch's result for both tables
+query III
+SELECT item, price, info.b FROM prices ORDER BY item
+----
+Boots	80	y
+Hat	25	v
+Jacket	110	x
+
+query II
+SELECT month, revenue FROM forecast ORDER BY month
+----
+1	1000
+2	1200
+
+# rows that existed before keep their row ids; the branch's new row gets a main row id
+query II
+SELECT item, rowid FROM prices WHERE item IN ('Jacket', 'Boots') ORDER BY rowid
+----
+Jacket	0
+Boots	1
+
+query I
+SELECT rowid >= 4 AND rowid < 1000000000000000000 FROM prices WHERE item = 'Hat'
+----
+true
+
+# one new snapshot holds everything
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+7
+
+query I
+SELECT list_sort(map_keys(changes)) FROM ducklake_snapshots('ducklake') WHERE snapshot_id = 6
+----
+[tables_deleted_from, tables_inserted_into]
+
+query II
+SELECT commit_message, commit_extra_info FROM ducklake_meta.ducklake_snapshot_changes WHERE snapshot_id = 6
+----
+MERGE BRANCH analysis	{"branch": "analysis", "fork_snapshot_id": 5, "branch_commits": 5}
+
+# main before the merge is unchanged
+query II
+SELECT item, price FROM prices AT (VERSION => 5) ORDER BY item
+----
+Boots	80
+Gloves	30
+Jacket	100
+Scarf	20
+
+query II
+SELECT month, revenue FROM forecast AT (VERSION => 5) ORDER BY month
+----
+1	1000
+2	1100
+
+# the change feed sees the branch's work at the merge snapshot
+query II
+SELECT change_type, item FROM ducklake_table_changes('ducklake', 'main', 'prices', 6, 6) ORDER BY change_type, item
+----
+delete	Gloves
+delete	Scarf
+insert	Hat
+update_postimage	Jacket
+update_preimage	Jacket
+
+# stats are right after the merge, and every merged file carries full per-column stats
+query IIIII
+SELECT COUNT(*), MIN(price), MAX(price), MIN(item), MAX(item) FROM prices
+----
+3	25	110	Boots	Jacket
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_file_column_stats s JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.begin_snapshot = 6 AND (s.column_size_bytes IS NULL OR s.column_size_bytes = 0 OR s.value_count IS NULL)
+----
+0
+
+# the branch is merged: gone from the list, no rows left, its files belong to main
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+0
+
+statement error
+SET BRANCH analysis
+----
+does not exist
+
+query II
+SELECT status, head_seq FROM ducklake_meta.ducklake_branching_branch
+----
+merged	6
+
+query I
+SELECT changes_made FROM ducklake_meta.ducklake_branching_commit WHERE commit_seq = 6
+----
+merged:6
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_data_file
+----
+0
+
+# the merge itself scheduled nothing: main took over every file
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+1
+
+# the name can be used again
+query II
+CREATE BRANCH analysis
+----
+analysis	6
+
+statement ok
+DROP BRANCH analysis
