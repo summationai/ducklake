@@ -1,4 +1,5 @@
 #include "ducklake_extension.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -128,6 +129,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto unreadable_macro_default_func = DuckLakeUnreadableMacroDefaultFunction();
 	loader.RegisterFunction(unreadable_macro_default_func);
+
+	DuckLakeBranching::Register(loader, config);
 }
 
 // LCOV_EXCL_START

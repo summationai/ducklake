@@ -1,4 +1,5 @@
 #include "common/ducklake_util.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
@@ -655,6 +656,11 @@ vector<DuckLakeFileListExtendedEntry> DuckLakeMultiFileList::GetFilesExtended() 
 
 void DuckLakeMultiFileList::ApplyLocalChanges(DuckLakeTransaction &transaction) const {
 	ApplyLocalFileChanges(transaction, read_info.table_id, files);
+	if (transaction.HasLocalDeletes(read_info.table_id)) {
+		for (auto &file_entry : files) {
+			DuckLakeBranching::PrepareLocalDelete(transaction, read_info.table_id, file_entry);
+		}
+	}
 	if (transaction.HasLocalInlinedFileDeletes(read_info.table_id)) {
 		for (auto &file_entry : files) {
 			if (file_entry.file_id.IsValid()) {
