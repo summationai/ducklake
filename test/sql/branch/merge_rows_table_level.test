@@ -87,6 +87,24 @@ INSERT INTO compacted VALUES (5)
 statement ok
 CALL ducklake_merge_adjacent_files('ducklake', 'compacted')
 
+# the dry run reports the conflicts the merges below fail with, and marks the rows as table conflicts
+query TTT
+SELECT table_name, status, regexp_extract(conflict, 'another transaction has [a-z ]+') FROM ducklake_merge_branch('ducklake', 'b_altered', dry_run => true) UNION ALL SELECT table_name, status, regexp_extract(conflict, 'another transaction has [a-z ]+') FROM ducklake_merge_branch('ducklake', 'b_renamed', dry_run => true) UNION ALL SELECT table_name, status, regexp_extract(conflict, 'another transaction has [a-z ]+') FROM ducklake_merge_branch('ducklake', 'b_compacted', dry_run => true) ORDER BY 1
+----
+altered	conflict	another transaction has altered it
+compacted	conflict	another transaction has compacted it
+renamed	conflict	another transaction has deleted from it
+
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b_renamed', dry_run => true, table_name => 'renamed')
+----
+delete	0	table conflict	1
+
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b_compacted', dry_run => true, table_name => 'compacted')
+----
+delete	0	table conflict	1
+
 statement error
 MERGE BRANCH b_altered
 ----

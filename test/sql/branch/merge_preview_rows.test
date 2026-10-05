@@ -1,0 +1,193 @@
+# name: test/sql/branch/merge_preview_rows.test
+# description: the dry run of one table, row by row, in the terms of ducklake_table_changes
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_preview_rows_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE prices(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO prices VALUES ('Boots', 80), ('Jacket', 100), ('Scarf', 20)
+
+# m holds inlined rows
+statement ok
+CREATE TABLE m(i INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'm')
+
+statement ok
+INSERT INTO m VALUES (1), (2), (3)
+
+statement ok
+CREATE TABLE unchanged(v INTEGER)
+
+statement ok
+INSERT INTO unchanged VALUES (1), (2)
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE s.t(k VARCHAR)
+
+statement ok
+INSERT INTO s.t VALUES ('a')
+
+statement ok
+CREATE VIEW v AS SELECT 1 AS one
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+UPDATE prices SET price = 110 WHERE item = 'Jacket'
+
+statement ok
+DELETE FROM prices WHERE item = 'Scarf'
+
+statement ok
+INSERT INTO prices VALUES ('Hat', 25)
+
+statement ok
+DELETE FROM m WHERE i = 2
+
+statement ok
+INSERT INTO m VALUES (4)
+
+# an update that changes no value
+statement ok
+UPDATE unchanged SET v = v WHERE v = 1
+
+statement ok
+INSERT INTO s.t VALUES ('b')
+
+statement ok
+SET BRANCH main
+
+# updates pair up by row id; a row the branch inserted has no row id until the merge
+query IIIII
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'prices')
+----
+update_preimage	1	ok	Jacket	100
+update_postimage	1	ok	Jacket	110
+delete	2	ok	Scarf	20
+insert	NULL	ok	Hat	25
+
+query I
+SELECT item FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'prices') WHERE change_type = 'delete'
+----
+Scarf
+
+# inlined rows of main
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'm')
+----
+delete	1	ok	2
+insert	NULL	ok	4
+
+# a table in another schema
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, schema => 's', table_name => 't')
+----
+insert	NULL	ok	b
+
+# rows whose values did not change are not listed, though the summary counts the rewrite
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'unchanged')
+----
+0
+
+query II
+SELECT rows_inserted, rows_deleted FROM ducklake_merge_branch('ducklake', 'b', dry_run => true) WHERE table_name = 'unchanged'
+----
+1	1
+
+# main's changes since the fork are not the branch's
+statement ok
+INSERT INTO s.t VALUES ('main')
+
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, schema => 's', table_name => 't')
+----
+insert	NULL	ok	b
+
+# what cannot be shown row by row
+statement error
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'missing')
+----
+Table "main.missing" does not exist on branch "b"
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'v')
+----
+"v" is a view, not a table - the dry run shows the rows of tables
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'missing', dry_run => true, table_name => 'prices')
+----
+Branch "missing" does not exist
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'b', table_name => 'prices')
+----
+table_name is only valid with dry_run => true
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, schema => 's')
+----
+schema is only valid with table_name
+
+statement ok
+SET BRANCH b
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'prices')
+----
+Cannot preview a merge while on a branch
+
+statement ok
+SET BRANCH main
+
+# the dry run changed nothing, and the merge does what it said
+query III
+SELECT (SELECT COUNT(*) FROM prices), (SELECT COUNT(*) FROM m), (SELECT COUNT(*) FROM ducklake_branches('ducklake'))
+----
+3	3	1
+
+statement ok
+MERGE BRANCH b
+
+statement ok
+SET VARIABLE merge_snapshot = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+query III
+SELECT change_type, item, price FROM ducklake_table_changes('ducklake', 'main', 'prices', getvariable('merge_snapshot'), getvariable('merge_snapshot')) ORDER BY rowid, change_type DESC
+----
+update_preimage	Jacket	100
+update_postimage	Jacket	110
+delete	Scarf	20
+insert	Hat	25
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	80
+Hat	25
+Jacket	110
