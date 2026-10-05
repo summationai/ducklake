@@ -1,0 +1,150 @@
+# name: test/sql/branch/merge_expiry.test
+# description: expiry keeps every snapshot from the oldest active fork; a merge refuses when they are missing
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_expiry_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+INSERT INTO t VALUES (2)
+
+query II
+CREATE BRANCH b
+----
+b	3
+
+statement ok
+INSERT INTO t VALUES (3)
+
+statement ok
+INSERT INTO t VALUES (4)
+
+# everything from the fork onward survives
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+query II
+SELECT COUNT(*), MIN(snapshot_id) FROM ducklake_snapshots('ducklake')
+----
+3	3
+
+# a second branch forking later changes nothing for the first
+query II
+CREATE BRANCH b2
+----
+b2	5
+
+statement ok
+INSERT INTO t VALUES (5)
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+query II
+SELECT COUNT(*), MIN(snapshot_id) FROM ducklake_snapshots('ducklake')
+----
+4	3
+
+# asking for a snapshot a branch needs by version is refused as well
+statement ok
+CALL ducklake_expire_snapshots('ducklake', versions => [4])
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+4
+
+# a snapshot removed behind our back stops the merge, because conflicts can no longer be checked
+statement ok
+DELETE FROM ducklake_meta.ducklake_snapshot WHERE snapshot_id = 4
+
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO t VALUES (100)
+
+statement ok
+SET BRANCH main
+
+statement error
+MERGE BRANCH b
+----
+were expired
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+2
+
+# the second branch's snapshots are intact, so it merges
+statement ok
+SET BRANCH b2
+
+statement ok
+INSERT INTO t VALUES (200)
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH b2
+
+query I
+SELECT SUM(i) FROM t
+----
+215
+
+# the fork snapshot itself removed behind our back: the branch cannot be merged
+statement ok
+CREATE BRANCH b3
+
+statement ok
+SET VARIABLE fork3 = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'b3')
+
+statement ok
+SET BRANCH b3
+
+statement ok
+INSERT INTO t VALUES (300)
+
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO t VALUES (400)
+
+statement ok
+DELETE FROM ducklake_meta.ducklake_snapshot WHERE snapshot_id = getvariable('fork3')
+
+statement error
+MERGE BRANCH b3
+----
+fork snapshot
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+2
+
+query I
+SELECT SUM(i) FROM t
+----
+615

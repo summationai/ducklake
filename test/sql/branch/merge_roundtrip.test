@@ -1,0 +1,129 @@
+# name: test/sql/branch/merge_roundtrip.test
+# description: a merged branch leaves the same file, stats and partition metadata as the same changes made on main
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_roundtrip_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# a is changed on a branch, b the same way on main
+statement ok
+CREATE TABLE a(i INTEGER, p INTEGER, d DOUBLE, s VARCHAR, v VARIANT, l INTEGER[], st STRUCT(x INTEGER, y VARCHAR))
+
+statement ok
+CREATE TABLE b(i INTEGER, p INTEGER, d DOUBLE, s VARCHAR, v VARIANT, l INTEGER[], st STRUCT(x INTEGER, y VARCHAR))
+
+statement ok
+ALTER TABLE a SET PARTITIONED BY (p)
+
+statement ok
+ALTER TABLE b SET PARTITIONED BY (p)
+
+statement ok
+CREATE MACRO rows_from(lo, hi) AS TABLE SELECT range::INTEGER AS i, (range % 3)::INTEGER AS p, CASE WHEN range % 11 = 0 THEN NULL WHEN range % 10 = 0 THEN 'nan'::DOUBLE ELSE range / 2 END AS d, 'v' || range AS s, (range % 5)::VARIANT AS v, [range::INTEGER, range::INTEGER + 1] AS l, {'x': range::INTEGER, 'y': 'y' || range} AS st FROM range(lo, hi)
+
+statement ok
+INSERT INTO a SELECT * FROM rows_from(0, 100)
+
+statement ok
+INSERT INTO b SELECT * FROM rows_from(0, 100)
+
+statement ok
+CREATE BRANCH r
+
+statement ok
+SET BRANCH r
+
+statement ok
+INSERT INTO a SELECT * FROM rows_from(100, 200)
+
+statement ok
+DELETE FROM a WHERE i % 7 = 0 AND i < 50
+
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO b SELECT * FROM rows_from(100, 200)
+
+statement ok
+DELETE FROM b WHERE i % 7 = 0 AND i < 50
+
+statement ok
+MERGE BRANCH r
+
+statement ok
+SET VARIABLE a_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 'a' AND end_snapshot IS NULL)
+
+statement ok
+SET VARIABLE b_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 'b' AND end_snapshot IS NULL)
+
+query I
+SELECT COUNT(*) FROM (SELECT i, p, d, s, v::VARCHAR, l, st FROM a EXCEPT ALL SELECT i, p, d, s, v::VARCHAR, l, st FROM b)
+----
+0
+
+query II
+SELECT (SELECT COUNT(*) FROM a), (SELECT COUNT(*) FROM b)
+----
+192	192
+
+# data files
+query II
+SELECT COUNT(*) FILTER (table_id = getvariable('a_id')), COUNT(*) FILTER (table_id = getvariable('b_id')) FROM ducklake_meta.ducklake_data_file WHERE end_snapshot IS NULL
+----
+6	6
+
+query I
+SELECT COUNT(*) FROM (SELECT record_count, file_size_bytes, footer_size FROM ducklake_meta.ducklake_data_file WHERE table_id = getvariable('a_id') AND end_snapshot IS NULL EXCEPT ALL SELECT record_count, file_size_bytes, footer_size FROM ducklake_meta.ducklake_data_file WHERE table_id = getvariable('b_id') AND end_snapshot IS NULL)
+----
+0
+
+# per-file column stats, including NaN and variant stats
+query I
+SELECT COUNT(*) FROM (SELECT f.record_count, s.column_id, s.value_count, s.null_count, s.min_value, s.max_value, s.contains_nan, s.column_size_bytes, s.extra_stats FROM ducklake_meta.ducklake_file_column_stats s JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.table_id = getvariable('a_id') AND f.end_snapshot IS NULL EXCEPT ALL SELECT f.record_count, s.column_id, s.value_count, s.null_count, s.min_value, s.max_value, s.contains_nan, s.column_size_bytes, s.extra_stats FROM ducklake_meta.ducklake_file_column_stats s JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.table_id = getvariable('b_id') AND f.end_snapshot IS NULL)
+----
+0
+
+query II
+SELECT bool_or(s.contains_nan::BOOLEAN), COUNT(*) FILTER (s.extra_stats IS NOT NULL) > 0 FROM ducklake_meta.ducklake_file_column_stats s JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.table_id = getvariable('a_id') AND f.begin_snapshot = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+----
+true	true
+
+# partition values
+query I
+SELECT COUNT(*) FROM (SELECT f.record_count, v.partition_key_index, v.partition_value FROM ducklake_meta.ducklake_file_partition_value v JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.table_id = getvariable('a_id') AND f.end_snapshot IS NULL EXCEPT ALL SELECT f.record_count, v.partition_key_index, v.partition_value FROM ducklake_meta.ducklake_file_partition_value v JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.table_id = getvariable('b_id') AND f.end_snapshot IS NULL)
+----
+0
+
+# delete files (their size depends on the data file paths they hold, so only the counts are compared)
+query I
+SELECT COUNT(*) FROM (SELECT delete_count FROM ducklake_meta.ducklake_delete_file WHERE table_id = getvariable('a_id') AND end_snapshot IS NULL EXCEPT ALL SELECT delete_count FROM ducklake_meta.ducklake_delete_file WHERE table_id = getvariable('b_id') AND end_snapshot IS NULL)
+----
+0
+
+query II
+SELECT COUNT(*) FILTER (table_id = getvariable('a_id')), COUNT(*) FILTER (table_id = getvariable('b_id')) FROM ducklake_meta.ducklake_delete_file WHERE end_snapshot IS NULL
+----
+3	3
+
+# table-level stats
+query I
+SELECT COUNT(*) FROM (SELECT column_id, contains_null, contains_nan, min_value, max_value FROM ducklake_meta.ducklake_table_column_stats WHERE table_id = getvariable('a_id') EXCEPT ALL SELECT column_id, contains_null, contains_nan, min_value, max_value FROM ducklake_meta.ducklake_table_column_stats WHERE table_id = getvariable('b_id'))
+----
+0
+
+query II
+SELECT (SELECT record_count FROM ducklake_meta.ducklake_table_stats WHERE table_id = getvariable('a_id')), (SELECT record_count FROM ducklake_meta.ducklake_table_stats WHERE table_id = getvariable('b_id'))
+----
+200	200

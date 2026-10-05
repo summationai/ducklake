@@ -1,0 +1,214 @@
+# name: test/sql/branch/merge_lifecycle.test
+# description: merge preconditions, empty branches, connections on a merged branch, commit messages
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_lifecycle_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2), (3)
+
+# a branch without commits is merged without a snapshot
+statement ok
+CREATE BRANCH empty
+
+query III
+MERGE BRANCH empty
+----
+empty	2	0
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+3
+
+query II
+SELECT status, changes_made FROM ducklake_meta.ducklake_branching_branch b JOIN ducklake_meta.ducklake_branching_commit c USING (branch_id) WHERE branch_name = 'empty'
+----
+merged	merged
+
+statement error
+MERGE BRANCH empty
+----
+does not exist
+
+statement error
+MERGE BRANCH missing
+----
+does not exist
+
+# a connection still on the branch is sent back to main once
+statement ok
+CREATE BRANCH b
+
+statement ok con1
+USE ducklake
+
+statement ok con1
+SET BRANCH b
+
+statement ok con1
+INSERT INTO t VALUES (10)
+
+statement ok
+MERGE BRANCH b
+
+statement error con1
+SELECT SUM(i) FROM t
+----
+no longer exists
+
+query I con1
+SELECT SUM(i) FROM t
+----
+16
+
+# merge preconditions
+statement ok
+CREATE BRANCH c
+
+statement ok
+CREATE BRANCH d
+
+statement ok
+BEGIN
+
+statement error
+MERGE BRANCH c
+----
+cannot be used inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+statement ok con1
+SET BRANCH c
+
+statement error con1
+MERGE BRANCH d
+----
+Cannot merge while on a branch
+
+statement ok con1
+SET BRANCH main
+
+# the function's author and message label the snapshot
+statement ok
+SET BRANCH d
+
+statement ok
+INSERT INTO t VALUES (20)
+
+statement ok
+SET BRANCH main
+
+query III
+CALL ducklake_merge_branch('ducklake', 'd', author => 'maya', message => 'add twenty')
+----
+d	3	1
+
+query II
+SELECT author, commit_message FROM ducklake_meta.ducklake_snapshot_changes WHERE snapshot_id = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+----
+maya	add twenty
+
+# a lake that requires commit messages needs the function form
+statement ok
+SET BRANCH c
+
+statement ok
+INSERT INTO t VALUES (30)
+
+statement ok
+SET BRANCH main
+
+statement ok
+CALL ducklake.set_option('require_commit_message', true)
+
+statement error
+MERGE BRANCH c
+----
+Commit Information
+
+query III
+CALL ducklake_merge_branch('ducklake', 'c', author => 'maya', message => 'add thirty')
+----
+c	3	1
+
+query I
+SELECT SUM(i) FROM t
+----
+66
+
+statement ok
+CALL ducklake.set_option('require_commit_message', false)
+
+# a read-only attach can read a branch, but not change branches or merge
+statement ok
+CREATE BRANCH ro
+
+statement ok
+SET BRANCH ro
+
+statement ok
+INSERT INTO t VALUES (40)
+
+statement ok
+SET BRANCH main
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_lifecycle_files', METADATA_CATALOG 'ducklake_meta', READ_ONLY)
+
+statement ok
+USE ducklake
+
+statement error
+MERGE BRANCH ro
+----
+attached read-write
+
+statement error
+CREATE BRANCH ro2
+----
+attached read-write
+
+statement error
+DROP BRANCH ro
+----
+attached read-write
+
+statement ok
+SET BRANCH ro
+
+query I
+SELECT SUM(i) FROM t
+----
+106
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT SUM(i) FROM t
+----
+66

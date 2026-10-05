@@ -2048,7 +2048,8 @@ WHERE idt.schema_version < (
 
 SnapshotAndStats DuckLakeTransactionState::CheckForConflicts(
     DuckLakeSnapshot transaction_snapshot, const TransactionChangeInformation &changes,
-    const std::function<unique_ptr<QueryResult>(string)> &executor, bool supports_v1_1_metadata) {
+    const std::function<unique_ptr<QueryResult>(string)> &executor, bool supports_v1_1_metadata,
+    const std::function<void(const SnapshotChangeInformation &)> &pre_commit_check) {
 	SnapshotAndStats snapshot_and_stats;
 	// get all changes made to the system after the current snapshot was started
 	auto changes_made =
@@ -2058,6 +2059,9 @@ SnapshotAndStats DuckLakeTransactionState::CheckForConflicts(
 
 	// now check for conflicts
 	CheckForConflicts(changes, other_changes, transaction_snapshot, executor);
+	if (pre_commit_check) {
+		pre_commit_check(other_changes);
+	}
 
 	return snapshot_and_stats;
 }
@@ -2076,12 +2080,12 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 		auto attempt_dropped_file_stats = dropped_file_stats;
 		try {
 			can_retry = false;
-			if (i > 0) {
+			if (i > 0 || context.pre_commit_check) {
 				// we failed our first commit due to another transaction committing
 				// retry - but first check for conflicts
 				commit_stats_snapshot =
 				    CheckForConflicts(transaction_snapshot, attempt_changes, context.conflict_query_executor,
-				                      context.supports_v1_1_metadata);
+				                      context.supports_v1_1_metadata, context.pre_commit_check);
 				stats = &commit_stats_snapshot.stats;
 			} else {
 				commit_stats_snapshot.snapshot = context.get_snapshot();
@@ -2097,6 +2101,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			string batch_queries = DuckLakeMetadataManager::InsertSnapshotSql();
 			batch_queries += CommitChanges(commit_state, attempt_changes, stats, context, attempt_dropped_file_stats);
 			batch_queries += WriteSnapshotChanges(commit_state, attempt_changes, context.commit_info);
+			batch_queries += context.extra_commit_sql;
 			auto res = context.execute_commit_batch(commit_snapshot, batch_queries);
 			if (res->HasError()) {
 				auto &commit_error = res->GetErrorObject();
