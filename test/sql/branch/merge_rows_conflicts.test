@@ -1,0 +1,176 @@
+# name: test/sql/branch/merge_rows_conflicts.test
+# description: rows both sides changed differently conflict, naming the rows; table-level rules still apply
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_conflicts_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO t VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4)
+
+statement ok
+CREATE TABLE many(i INTEGER)
+
+statement ok
+INSERT INTO many SELECT range FROM range(20)
+
+statement ok
+CREATE TABLE altered(i INTEGER)
+
+statement ok
+INSERT INTO altered VALUES (1), (2)
+
+statement ok
+CREATE TABLE dropped(i INTEGER)
+
+statement ok
+INSERT INTO dropped VALUES (1), (2)
+
+statement ok
+CREATE BRANCH updates
+
+statement ok
+CREATE BRANCH update_delete
+
+statement ok
+CREATE BRANCH delete_update
+
+statement ok
+CREATE BRANCH lots
+
+statement ok
+CREATE BRANCH table_level
+
+statement ok
+SET BRANCH updates
+
+statement ok
+UPDATE t SET price = 100 WHERE item = 'a'
+
+statement ok
+SET BRANCH update_delete
+
+statement ok
+UPDATE t SET price = 200 WHERE item = 'b'
+
+statement ok
+SET BRANCH delete_update
+
+statement ok
+DELETE FROM t WHERE item = 'c'
+
+statement ok
+SET BRANCH lots
+
+statement ok
+UPDATE many SET i = i + 100
+
+statement ok
+SET BRANCH table_level
+
+statement ok
+DELETE FROM altered WHERE i = 1
+
+statement ok
+DELETE FROM dropped WHERE i = 1
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE t SET price = 101 WHERE item = 'a'
+
+statement ok
+DELETE FROM t WHERE item = 'b'
+
+statement ok
+UPDATE t SET price = 300 WHERE item = 'c'
+
+statement ok
+UPDATE many SET i = i + 1000
+
+statement ok
+ALTER TABLE altered ADD COLUMN j INTEGER
+
+statement ok
+DROP TABLE dropped
+
+statement ok
+SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+# both updated a, to different values
+statement error
+MERGE BRANCH updates
+----
+Transaction conflict - branch "updates" and main changed 1 row(s) of table "t" differently since the fork (rowid 0)
+
+# the branch updated b, main deleted it
+statement error
+MERGE BRANCH update_delete
+----
+changed 1 row(s) of table "t" differently since the fork (rowid 1)
+
+# the branch deleted c, main updated it
+statement error
+MERGE BRANCH delete_update
+----
+changed 1 row(s) of table "t" differently since the fork (rowid 2)
+
+# the message names the first ten rows
+statement error
+MERGE BRANCH lots
+----
+changed 20 row(s) of table "many" differently since the fork (rowid 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, ...)
+
+# main altered or dropped the table: the table-level rules. Main cannot compact or flush rows an open branch reads at
+# its fork, so those never meet a branch's deletes.
+statement error
+MERGE BRANCH table_level
+----
+but another transaction has altered it
+
+# the failed merges changed nothing
+query I
+SELECT MAX(snapshot_id) = getvariable('head') FROM ducklake_snapshots('ducklake')
+----
+true
+
+query TI
+FROM t ORDER BY item
+----
+a	101
+c	300
+d	4
+
+statement ok
+SET BRANCH updates
+
+query TI
+FROM t ORDER BY item
+----
+a	100
+b	2
+c	3
+d	4
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+5

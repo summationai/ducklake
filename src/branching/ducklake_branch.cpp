@@ -1,5 +1,6 @@
 #include "branching/ducklake_branch.hpp"
 
+#include "branching/ducklake_branch_util.hpp"
 #include "common/ducklake_util.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -57,25 +58,8 @@ void DuckLakeBranchState::ClearIfSelected(idx_t catalog_oid, idx_t branch_id) {
 //===--------------------------------------------------------------------===//
 // Helpers
 //===--------------------------------------------------------------------===//
-static unique_ptr<QueryResult> RunBranchQuery(DuckLakeTransaction &transaction, string query, const string &error) {
-	auto result = transaction.Query(std::move(query));
-	if (result->HasError()) {
-		result->GetErrorObject().Throw(error);
-	}
-	return result;
-}
-
 static string OptionalToSQL(const optional_idx &value) {
 	return value.IsValid() ? to_string(value.GetIndex()) : "NULL";
-}
-
-static string LoadBranchPath(DuckLakeCatalog &catalog, const string &base_path, const string &path, bool relative) {
-	auto result = relative ? base_path + path : path;
-	auto &separator = catalog.Separator();
-	if (separator != "/") {
-		result = StringUtil::Replace(result, "/", separator);
-	}
-	return result;
 }
 
 static optional_idx OptionalIndex(const Value &value) {
@@ -589,13 +573,6 @@ static string DeleteFileValues(DuckLakeMetadataManager &metadata_manager, idx_t 
 	                          DuckLakeUtil::EncryptionKeyLiteral(delete_file.encryption_key));
 }
 
-static void AppendValues(string &target, const string &values) {
-	if (!target.empty()) {
-		target += ", ";
-	}
-	target += values;
-}
-
 static void AppendChange(string &changes, const string &kind, const set<TableIndex> &tables) {
 	for (auto &table_id : tables) {
 		if (!changes.empty()) {
@@ -897,14 +874,15 @@ void LoadMainDeletes(ClientContext &context, const DuckLakeFileListExtendedEntry
 }
 
 //! Separates the branch's deletes on a main file from main's own deletes at the fork. When main had none, the
-//! branch's delete file holds exactly the branch's deletes and is not read.
+//! branch's delete file holds exactly the branch's deletes; it is read only when the caller needs the positions.
 MainFileDeletes AnalyseMainDelete(ClientContext &context, LocalTableChanges &local_changes, TableIndex table_id,
                                   const DuckLakeLoadedBranch::MainDelete &main_delete,
                                   const DuckLakeFileListExtendedEntry &main_file,
-                                  optional_ptr<const set<idx_t>> inlined_positions, DuckLakeSnapshot fork_snapshot) {
+                                  optional_ptr<const set<idx_t>> inlined_positions, DuckLakeSnapshot fork_snapshot,
+                                  bool read_unchanged) {
 	MainFileDeletes result;
 	LoadMainDeletes(context, main_file, inlined_positions, fork_snapshot, result);
-	if (!result.has_main_delete && !result.has_inlined) {
+	if (!result.has_main_delete && !result.has_inlined && !read_unchanged) {
 		return result;
 	}
 	DuckLakeFileData branch_file_data;
@@ -969,7 +947,23 @@ void CheckMergeOnlyConflicts(const string &branch_name, const set<TableIndex> &d
 
 void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge) {
 	auto &loaded = merge.loaded;
-	if (loaded.main_deletes.empty()) {
+	// per table and main file: the branch's delete file on it, and main's copies of rows the branch's changes win for
+	struct FileDeletes {
+		optional_ptr<const DuckLakeLoadedBranch::MainDelete> branch_delete;
+		vector<pair<idx_t, int64_t>> replaced_rows;
+	};
+	map<TableIndex, map<string, FileDeletes>> per_table;
+	for (auto &main_delete : loaded.main_deletes) {
+		per_table[main_delete.table_id][main_delete.data_file_path].branch_delete = main_delete;
+	}
+	for (auto &table : merge.row_merge) {
+		for (auto &file : table.second.main_rows_to_drop) {
+			auto &replaced = per_table[table.first][file.first].replaced_rows;
+			replaced.insert(replaced.end(), file.second.begin(), file.second.end());
+		}
+	}
+	ForgetFilesMainEmptied(transaction, merge);
+	if (per_table.empty()) {
 		return;
 	}
 	auto context_ref = transaction.context.lock();
@@ -980,51 +974,84 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 	auto &fs = FileSystem::GetFileSystem(context);
 	// the branch's deletes become visible at the merge snapshot - the next one, as a DELETE on main assumes
 	auto merge_snapshot = metadata_manager.GetSnapshot()->snapshot_id + 1;
+	// main's deletes are taken as they are at main's head, so every main file gets one delete file holding both sides'
+	auto head = merge.head_snapshot;
 
-	map<TableIndex, vector<reference<DuckLakeLoadedBranch::MainDelete>>> per_table;
-	for (auto &main_delete : loaded.main_deletes) {
-		per_table[main_delete.table_id].push_back(main_delete);
-	}
 	for (auto &table_entry : per_table) {
 		auto table_id = table_entry.first;
-		auto &table = GetTableAtFork(transaction, merge.fork_snapshot, table_id, loaded.info.name);
+		auto entry = transaction.GetCatalog().GetEntryById(transaction, head, table_id);
+		if (!entry) {
+			// main dropped the table, which the merge's conflict check reports - unless it never existed
+			GetTableAtFork(transaction, merge.fork_snapshot, table_id, loaded.info.name);
+			continue;
+		}
+		auto &table = entry->Cast<DuckLakeTableEntry>();
 		auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
 		bool use_deletion_vectors =
 		    catalog.WriteDeletionVectors(schema.GetSchemaId(), table_id, &table.GetTableOptions());
-		auto main_files = metadata_manager.GetExtendedFilesForTable(table, merge.fork_snapshot, nullptr);
-		unordered_map<idx_t, reference<DuckLakeFileListExtendedEntry>> files_by_id;
+		auto row_merged = merge.row_merge.find(table_id) != merge.row_merge.end();
+		auto main_files = metadata_manager.GetExtendedFilesForTable(table, head, nullptr);
+		unordered_map<string, reference<DuckLakeFileListExtendedEntry>> files_by_path;
 		for (auto &file : main_files) {
 			if (file.file_id.IsValid()) {
-				files_by_id.emplace(file.file_id.index, file);
+				files_by_path.emplace(file.file.path, file);
 			}
 		}
-		auto inlined_deletions = metadata_manager.ReadInlinedFileDeletions(table_id, merge.fork_snapshot);
-		for (auto &main_delete_ref : table_entry.second) {
-			auto &main_delete = main_delete_ref.get();
-			auto file_entry = files_by_id.find(main_delete.data_file_id);
-			if (file_entry == files_by_id.end()) {
-				throw InvalidInputException("Branch \"%s\" deleted from data file %d, which is not visible at its fork",
-				                            loaded.info.name, main_delete.data_file_id);
-			}
-			auto &main_file = file_entry->second.get();
-			auto deletes = AnalyseMainDelete(context, local_changes, table_id, main_delete, main_file,
-			                                 FindInlinedPositions(inlined_deletions, main_delete.data_file_id),
-			                                 merge.fork_snapshot);
-			if (!deletes.has_main_delete && !deletes.has_inlined) {
-				// the branch's delete file holds exactly the branch's deletes - main takes it over as is
+		auto inlined_deletions = metadata_manager.ReadInlinedFileDeletions(table_id, head);
+		for (auto &file_entry : table_entry.second) {
+			auto &data_file_path = file_entry.first;
+			auto &file_deletes = file_entry.second;
+			auto branch_delete = file_deletes.branch_delete;
+			auto main_file_entry = files_by_path.find(data_file_path);
+			if (main_file_entry == files_by_path.end()) {
+				if (!file_deletes.replaced_rows.empty()) {
+					// main's copies held inlined: deleted by row id
+					set<idx_t> row_ids;
+					for (auto &row : file_deletes.replaced_rows) {
+						row_ids.insert(static_cast<idx_t>(row.second));
+					}
+					local_changes.AddNewInlinedDeletes(table_id, data_file_path, std::move(row_ids));
+				}
+				if (branch_delete && row_merged) {
+					// main deleted the whole file since the fork; the row-by-row merge found every row the branch
+					// deleted from it deleted on main too
+					merge.files_to_schedule.emplace_back(loaded.delete_files[branch_delete->branch_delete_file],
+					                                     branch_delete->branch_delete_file);
+					ForgetDeleteFiles(transaction, table_id, data_file_path);
+				}
+				// otherwise main compacted the file, which the merge's conflict check reports
 				continue;
 			}
-			// the branch's own delete file is replaced below, or dropped with the data file
-			merge.files_to_schedule.emplace_back(loaded.delete_files[main_delete.branch_delete_file],
-			                                     main_delete.branch_delete_file);
+			auto &main_file = main_file_entry->second.get();
+			auto inlined_positions = FindInlinedPositions(inlined_deletions, main_file.file_id.index);
+			MainFileDeletes deletes;
+			if (branch_delete) {
+				deletes = AnalyseMainDelete(context, local_changes, table_id, *branch_delete, main_file,
+				                            inlined_positions, head, !file_deletes.replaced_rows.empty());
+				if (!deletes.has_main_delete && !deletes.has_inlined && file_deletes.replaced_rows.empty()) {
+					// the branch's delete file holds exactly the branch's deletes - main takes it over as is
+					continue;
+				}
+				// the branch's own delete file is replaced below, or dropped with the data file
+				merge.files_to_schedule.emplace_back(loaded.delete_files[branch_delete->branch_delete_file],
+				                                     branch_delete->branch_delete_file);
+			} else {
+				LoadMainDeletes(context, main_file, inlined_positions, head, deletes);
+			}
+			for (auto &row : file_deletes.replaced_rows) {
+				deletes.branch_only.insert(row.first);
+			}
 			if (deletes.DeletedCount() >= main_file.row_count) {
-				ForgetDeleteFiles(transaction, table_id, main_delete.data_file_path);
-				transaction.DropFile(table_id, DataFileIndex(main_delete.data_file_id), main_delete.data_file_path,
-				                     main_file.row_count, main_file.file.file_size_bytes);
+				if (branch_delete) {
+					ForgetDeleteFiles(transaction, table_id, data_file_path);
+				}
+				transaction.DropFile(table_id, main_file.file_id, data_file_path, main_file.row_count,
+				                     main_file.file.file_size_bytes);
 				continue;
 			}
 			if (deletes.branch_only.empty()) {
-				ForgetDeleteFiles(transaction, table_id, main_delete.data_file_path);
+				// every row the branch deleted from the file is deleted on main already
+				ForgetDeleteFiles(transaction, table_id, data_file_path);
 				continue;
 			}
 			auto encryption_key = catalog.GenerateEncryptionKey(context);
@@ -1038,14 +1065,9 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 					with_snapshot.snapshot_id = static_cast<int64_t>(merge_snapshot);
 					positions.insert(with_snapshot);
 				}
-				WriteDeleteFileWithSnapshotsInput input {context,
-				                                         transaction,
-				                                         fs,
-				                                         table.DataPath(),
-				                                         encryption_key,
-				                                         main_delete.data_file_path,
-				                                         positions,
-				                                         DeleteFileSource::REGULAR};
+				WriteDeleteFileWithSnapshotsInput input {
+				    context,        transaction,    fs,        table.DataPath(),
+				    encryption_key, data_file_path, positions, DeleteFileSource::REGULAR};
 				written = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
 				written.overwrites_existing_delete = true;
 				written.overwritten_delete_file.delete_file_id = main_file.delete_file_id;
@@ -1061,12 +1083,12 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 				                            fs,
 				                            table.DataPath(),
 				                            encryption_key,
-				                            main_delete.data_file_path,
+				                            data_file_path,
 				                            deletes.branch_only,
 				                            DeleteFileSource::REGULAR};
 				written = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
 			}
-			written.data_file_id = DataFileIndex(main_delete.data_file_id);
+			written.data_file_id = main_file.file_id;
 			vector<DuckLakeDeleteFile> written_files;
 			written_files.push_back(std::move(written));
 			transaction.AddDeletes(table_id, std::move(written_files));
@@ -1074,23 +1096,70 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 	}
 }
 
+void DuckLakeBranchManager::ForgetFilesMainEmptied(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge) {
+	// a main file the branch emptied, which main has emptied since the fork as well, is gone at main's head
+	auto &state = *transaction.state;
+	for (auto &table : merge.row_merge) {
+		set<idx_t> emptied;
+		for (auto &dropped : merge.loaded.dropped_files) {
+			if (dropped.second == table.first) {
+				emptied.insert(dropped.first);
+			}
+		}
+		if (emptied.empty()) {
+			continue;
+		}
+		auto entry = transaction.GetCatalog().GetEntryById(transaction, merge.head_snapshot, table.first);
+		auto main_files = transaction.GetMetadataManager().GetExtendedFilesForTable(entry->Cast<DuckLakeTableEntry>(),
+		                                                                            merge.head_snapshot, nullptr);
+		for (auto &file : main_files) {
+			if (file.file_id.IsValid()) {
+				emptied.erase(file.file_id.index);
+			}
+		}
+		if (emptied.empty()) {
+			continue;
+		}
+		auto references = ResolveMainFiles(transaction, emptied, merge.fork_snapshot, merge.loaded.info);
+		auto &stats = state.dropped_file_stats[table.first];
+		for (auto &reference : references) {
+			state.dropped_files.erase(reference.second.path);
+			stats.row_count -= reference.second.row_count;
+			stats.file_size_bytes -= reference.second.file_size_bytes;
+		}
+	}
+}
+
 void DuckLakeBranchManager::DropFullyDeletedBranchFiles(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge) {
 	auto &local_changes = transaction.state->local_changes;
 	vector<pair<TableIndex, string>> fully_deleted;
+	vector<string> written_by_merge;
 	for (auto &entry : local_changes.Changes()) {
 		for (auto &file : entry.GetTableChanges().new_data_files) {
 			if (!file.delete_files.empty() && file.delete_files.back().delete_count >= file.row_count) {
 				fully_deleted.emplace_back(entry.GetTableIndex(), file.file_name);
 				merge.files_to_schedule.emplace_back(merge.loaded.data_files[file.file_name], file.file_name);
 				for (auto &delete_file : file.delete_files) {
-					merge.files_to_schedule.emplace_back(merge.loaded.delete_files[delete_file.file_name],
-					                                     delete_file.file_name);
+					auto branch_file = merge.loaded.delete_files.find(delete_file.file_name);
+					if (branch_file != merge.loaded.delete_files.end()) {
+						merge.files_to_schedule.emplace_back(branch_file->second, delete_file.file_name);
+					} else {
+						// written by this merge, for the rows main's copy stays for
+						written_by_merge.push_back(delete_file.file_name);
+					}
 				}
 			}
 		}
 	}
 	for (auto &entry : fully_deleted) {
 		ForgetFile(transaction, entry.first, entry.second);
+	}
+	if (!written_by_merge.empty()) {
+		auto context_ref = transaction.context.lock();
+		auto &fs = FileSystem::GetFileSystem(*context_ref);
+		for (auto &path : written_by_merge) {
+			fs.TryRemoveFile(path);
+		}
 	}
 }
 
@@ -1115,6 +1184,16 @@ DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &tran
 	auto merge = make_uniq<DuckLakeBranchMerge>();
 	merge->fork_snapshot = *fork_snapshot;
 	LoadBranch(transaction, *branch, *fork_snapshot, merge->loaded, true);
+	merge->head_snapshot = transaction.GetSnapshot();
+	// tables both sides changed rows of merge row by row
+	merge->row_merge =
+	    FindRowMergeTables(transaction, merge->loaded, *fork_snapshot, MainChangesSince(transaction, *fork_snapshot));
+	auto context_ref = transaction.context.lock();
+	for (auto &table : merge->row_merge) {
+		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName().GetIdentifierName(), branch->name,
+		             branch->fork_snapshot_id, merge->head_snapshot.snapshot_id, table.second);
+	}
+	ApplyRowMerge(transaction, *merge);
 	RebaseMainDeletes(transaction, *merge);
 	DropFullyDeletedBranchFiles(transaction, *merge);
 	merge->changes_fingerprint = ChangesFingerprint(transaction);
@@ -1150,7 +1229,11 @@ void DuckLakeBranchManager::CheckMerge(DuckLakeTransaction &transaction, const D
 			deleted_from.insert(entry.GetTableIndex());
 		}
 	}
+	for (auto &table : merge.row_merge) {
+		deleted_from.erase(table.first);
+	}
 	CheckMergeOnlyConflicts(info.name, deleted_from, other_changes);
+	CheckRowMergeTablesUnchanged(transaction, merge);
 }
 
 string DuckLakeBranchManager::MergeBookkeepingSql(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,

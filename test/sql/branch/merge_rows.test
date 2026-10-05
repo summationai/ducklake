@@ -1,0 +1,261 @@
+# name: test/sql/branch/merge_rows.test
+# description: tables both sides changed rows of merge row by row: a row only one side changed takes that change
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# file rows: every table holds one file of five rows
+statement ok
+CREATE TABLE same_value(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO same_value VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE other_rows(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO other_rows VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE both_deleted(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO both_deleted VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE delete_insert(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO delete_insert VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE insert_delete(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO insert_delete VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE main_rewrite(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO main_rewrite VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE branch_rewrite(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO branch_rewrite VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+# inlined rows
+statement ok
+CREATE TABLE inlined(item VARCHAR, price INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'inlined')
+
+statement ok
+INSERT INTO inlined VALUES ('a', 1), ('b', 2), ('c', 3)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+UPDATE same_value SET price = 20 WHERE item = 'b'
+
+statement ok
+UPDATE other_rows SET price = 10 WHERE item = 'a'
+
+statement ok
+DELETE FROM other_rows WHERE item = 'e'
+
+statement ok
+DELETE FROM both_deleted WHERE item IN ('b', 'c')
+
+statement ok
+DELETE FROM delete_insert WHERE item = 'a'
+
+statement ok
+INSERT INTO insert_delete VALUES ('f', 6)
+
+statement ok
+UPDATE main_rewrite SET price = 30 WHERE item = 'c'
+
+# a rewrite with the old values is no change
+statement ok
+UPDATE branch_rewrite SET price = price WHERE item = 'd'
+
+statement ok
+UPDATE inlined SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM inlined WHERE item = 'c'
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE same_value SET price = 20 WHERE item = 'b'
+
+statement ok
+UPDATE other_rows SET price = 40 WHERE item = 'd'
+
+statement ok
+DELETE FROM other_rows WHERE item = 'b'
+
+statement ok
+DELETE FROM both_deleted WHERE item IN ('c', 'd')
+
+statement ok
+INSERT INTO delete_insert VALUES ('f', 6)
+
+statement ok
+DELETE FROM insert_delete WHERE item = 'a'
+
+statement ok
+UPDATE main_rewrite SET price = price WHERE item = 'c'
+
+statement ok
+UPDATE branch_rewrite SET price = 40 WHERE item = 'd'
+
+statement ok
+UPDATE inlined SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM inlined WHERE item = 'a'
+
+statement ok
+SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+statement ok
+MERGE BRANCH b
+
+# both set b to 20: one row
+query TI
+FROM same_value ORDER BY item
+----
+a	1
+b	20
+c	3
+d	4
+e	5
+
+# each side's changes to its own rows
+query TI
+FROM other_rows ORDER BY item
+----
+a	10
+c	3
+d	40
+
+# both deleted c: deleted once
+query TI
+FROM both_deleted ORDER BY item
+----
+a	1
+e	5
+
+query TI
+FROM delete_insert ORDER BY item
+----
+b	2
+c	3
+d	4
+e	5
+f	6
+
+query TI
+FROM insert_delete ORDER BY item
+----
+b	2
+c	3
+d	4
+e	5
+f	6
+
+# main only rewrote c with its old value: the branch's change wins
+query TI
+FROM main_rewrite ORDER BY item
+----
+a	1
+b	2
+c	30
+d	4
+e	5
+
+# the branch only rewrote d with its old value: main's change wins
+query TI
+FROM branch_rewrite ORDER BY item
+----
+a	1
+b	2
+c	3
+d	40
+e	5
+
+query TI
+FROM inlined ORDER BY item
+----
+b	20
+
+# row ids stay unique in every table
+query IIII
+SELECT (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM same_value), (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM other_rows), (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM main_rewrite), (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM branch_rewrite)
+----
+true	true	true	true
+
+query I
+SELECT COUNT(*) FROM same_value WHERE rowid = 1
+----
+1
+
+# one main data file of other_rows, with one delete file holding both sides' deletes
+query II
+SELECT COUNT(*), SUM(delete_count) FROM ducklake_meta.ducklake_delete_file WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 'other_rows' AND end_snapshot IS NULL)
+----
+1	4
+
+# the merge snapshot holds only the branch's changes that won
+query TTI
+SELECT change_type, item, price FROM ducklake_table_changes('ducklake', 'main', 'other_rows', getvariable('head') + 1, getvariable('head') + 1) ORDER BY rowid, change_type DESC
+----
+update_preimage	a	1
+update_postimage	a	10
+delete	e	5
+
+query I
+SELECT COUNT(*) FROM ducklake_table_changes('ducklake', 'main', 'same_value', getvariable('head') + 1, getvariable('head') + 1)
+----
+0
+
+# the merge left a restartable lake
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_files', METADATA_CATALOG 'ducklake_meta')
+
+query TI
+FROM ducklake.other_rows ORDER BY item
+----
+a	10
+c	3
+d	40
