@@ -11,7 +11,8 @@ src/branching/ducklake_branch_parser.cpp | BranchTokenReader::SkipComments | pos
 src/branching/ducklake_branch_parser.cpp | BranchTokenReader::AtEnd | return true; | DuckDB's token stream always ends with an end-of-input token; reading past it is defensive
 src/branching/ducklake_branch.cpp | ResolveMainFiles | references table %d whic | a data file visible at the fork belongs to a table that exists at the fork; damaged file ids fail the check after it (tested in branch_corruption)
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::PreviewMerge (lambda) | deleted from data file %d | already checked when the branch is loaded (ResolveMainFiles, tested in branch_corruption)
-src/branching/ducklake_branch.cpp | LoadFileDetails | continue; | stats and partition rows of branch files not visible at the head, or of tables or columns missing at the fork; branches change no schema and never end their own data files
+src/branching/ducklake_branch.cpp | LoadFileDetails | continue; | stats and partition rows of branch files not visible at the head, or of tables or columns missing: a branch drops no columns, and a commit that ends a file deletes its stats and partition rows
+src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::GetTableEntry | return nullptr; | asked only for tables whose files the transaction holds, which it created
 src/branching/ducklake_branch_transaction.cpp | DuckLakeBranchManager::GetBranchSnapshot | return *state.loading_fork_snapshot; | re-entrant snapshot lookup while the branch loads; LoadBranch passes the fork snapshot explicitly, so nothing re-enters today
 src/branching/ducklake_branch_transaction.cpp | DuckLakeBranchManager::GetBranchSnapshot | return *transaction.snapshot; | another thread loaded the branch while this one waited for the load lock (parallel first use of one transaction)
 src/branching/ducklake_branch_transaction.cpp | ClearBranchSelection | return; | the client context is gone, and the selection belongs to it
@@ -29,8 +30,9 @@ src/branching/ducklake_branch_row_merge.cpp | DuckLakeBranchManager::CheckRowMer
 # errors of the metadata catalog itself (I/O, lost connection)
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::HasBranchTables | Failed to probe DuckLake branch tabl | the metadata catalog fails for a reason other than a missing table
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::PreviewMerge (lambda) | Failed to preview the merge | the metadata catalog fails while the dry run reads main's changes
-src/branching/ducklake_branch.cpp | DuckLakeBranchManager::PreviewMerge | throw; | a non-conflict error during the dry run's conflict check, i.e. a failing metadata catalog
+src/branching/ducklake_branch.cpp | DuckLakeBranchManager::PreviewMerge (lambda) | throw; | a non-conflict error during the dry run's conflict check, i.e. a failing metadata catalog
 src/branching/ducklake_branching.cpp | DuckLakeBranching::IsInlinedTablePinned | Failed to check inlined data agains | the metadata catalog fails while flushing inlined data
 src/branching/ducklake_branching.cpp | DuckLakeBranching::AddKnownFiles | Failed to get branch files from Duc | the metadata catalog fails during orphan cleanup
+src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::HasDefinitionTables | Failed to probe DuckLake branch tabl | the metadata catalog fails for a reason other than a missing table
 src/branching/ducklake_branch_row_merge.cpp | DuckLakeBranchManager::MainChangesSince (lambda) | Failed to read main's changes since | the metadata catalog fails while the merge reads main's changes since the fork
 src/branching/ducklake_branch_merge_rows.cpp | RunBranchSql | result->GetErrorObject().Throw(); | an internal read of a table fails, i.e. its metadata or data files cannot be read

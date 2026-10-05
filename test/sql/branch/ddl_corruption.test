@@ -1,0 +1,399 @@
+# name: test/sql/branch/ddl_corruption.test
+# description: damaged catalog rows of a branch are reported as an error and leave main and other branches usable
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_corruption_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+CREATE BRANCH healthy
+
+statement ok
+SET BRANCH healthy
+
+statement ok
+CREATE TABLE fine AS SELECT 1 AS one
+
+statement ok
+SET BRANCH main
+
+# every branch below gets one kind of damage
+statement ok
+CREATE BRANCH unknown_change
+
+statement ok
+SET BRANCH unknown_change
+
+statement ok
+DROP TABLE t
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE unknown_change = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'unknown_change')
+
+statement ok
+CREATE BRANCH unknown_type
+
+statement ok
+SET BRANCH unknown_type
+
+statement ok
+CREATE TABLE x(i INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE unknown_type = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'unknown_type')
+
+statement ok
+CREATE BRANCH orphan_column
+
+statement ok
+SET BRANCH orphan_column
+
+statement ok
+CREATE TABLE x(i INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE orphan_column = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'orphan_column')
+
+statement ok
+CREATE BRANCH missing_main_object
+
+statement ok
+SET BRANCH missing_main_object
+
+statement ok
+DROP TABLE t
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE missing_main_object = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_main_object')
+
+statement ok
+CREATE BRANCH view_is_table
+
+statement ok
+SET BRANCH view_is_table
+
+statement ok
+DROP TABLE t
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE view_is_table = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'view_is_table')
+
+statement ok
+CREATE BRANCH missing_parent_schema
+
+statement ok
+SET BRANCH missing_parent_schema
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE missing_parent_schema = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_parent_schema')
+
+statement ok
+CREATE BRANCH missing_schema
+
+statement ok
+SET BRANCH missing_schema
+
+statement ok
+CREATE TABLE x(i INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE missing_schema = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_schema')
+
+statement ok
+CREATE BRANCH missing_next_column
+
+statement ok
+SET BRANCH missing_next_column
+
+statement ok
+CREATE TABLE x(i INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE missing_next_column = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_next_column')
+
+statement ok
+CREATE BRANCH missing_parent_column
+
+statement ok
+SET BRANCH missing_parent_column
+
+statement ok
+CREATE TABLE x(s STRUCT(a INTEGER))
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE missing_parent_column = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_parent_column')
+
+statement ok
+CREATE BRANCH bad_nested_type
+
+statement ok
+SET BRANCH bad_nested_type
+
+statement ok
+CREATE TABLE x(s STRUCT(a INTEGER))
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE bad_nested_type = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'bad_nested_type')
+
+statement ok
+CREATE BRANCH bad_default
+
+statement ok
+SET BRANCH bad_default
+
+statement ok
+CREATE TABLE x(i INTEGER DEFAULT 1)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE bad_default = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'bad_default')
+
+statement ok
+CREATE BRANCH files_of_missing_table
+
+statement ok
+SET BRANCH files_of_missing_table
+
+statement ok
+CREATE TABLE x AS SELECT 1 AS i
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE files_of_missing_table = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'files_of_missing_table')
+
+# the metadata is edited in statements of its own, as it would be by hand
+statement ok
+UPDATE ducklake_meta.ducklake_branching_main_change SET change_type = 'shrunk' WHERE branch_id = getvariable('unknown_change')
+
+statement ok
+SET BRANCH unknown_change
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "unknown_change" has an unknown catalog change "shrunk" of a table
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_object SET object_type = 'index' WHERE branch_id = getvariable('unknown_type')
+
+statement ok
+SET BRANCH unknown_type
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "unknown_type" has an object of unknown type "index"
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column SET object_id = 999 WHERE branch_id = getvariable('orphan_column')
+
+statement ok
+SET BRANCH orphan_column
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "orphan_column" has a column of a table it does not have
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_main_change SET main_id = 999999 WHERE branch_id = getvariable('missing_main_object')
+
+statement ok
+SET BRANCH missing_main_object
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "missing_main_object" changed table 999999, which does not exist at its fork
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_main_change SET object_type = 'view' WHERE branch_id = getvariable('view_is_table')
+
+statement ok
+SET BRANCH view_is_table
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "view_is_table" changed view 1, which does not exist at its fork
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_object SET parent_id = 4611686018427387904 + 999 WHERE branch_id = getvariable('missing_parent_schema')
+
+statement ok
+SET BRANCH missing_parent_schema
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "missing_parent_schema" has a schema whose parent schema is missing
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_object SET parent_id = NULL WHERE branch_id = getvariable('missing_schema')
+
+statement ok
+SET BRANCH missing_schema
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "missing_schema" has table "x" without a schema
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_object SET next_column_id = NULL WHERE branch_id = getvariable('missing_next_column')
+
+statement ok
+SET BRANCH missing_next_column
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "missing_next_column" has table "x" without a next column id
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column SET parent_column = 999 WHERE branch_id = getvariable('missing_parent_column') AND parent_column IS NOT NULL
+
+statement ok
+SET BRANCH missing_parent_column
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "missing_parent_column" has a column whose parent column is missing
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column SET column_type = 'tuple' WHERE branch_id = getvariable('bad_nested_type') AND parent_column IS NULL
+
+statement ok
+SET BRANCH bad_nested_type
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch column "s" has an invalid nested type "tuple"
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column SET default_value = '1, 2', default_value_type = 'expression' WHERE branch_id = getvariable('bad_default')
+
+statement ok
+SET BRANCH bad_default
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch column "i" has an invalid default
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_data_file SET table_id = 4611686018427387904 + 999 WHERE branch_id = getvariable('files_of_missing_table')
+
+statement ok
+SET BRANCH files_of_missing_table
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "files_of_missing_table" has files of table
+
+statement ok
+SET BRANCH main
+
+# main and the healthy branch are unaffected by all of it
+query I
+SELECT COUNT(*) FROM t
+----
+1
+
+statement ok
+SET BRANCH healthy
+
+query I
+FROM fine
+----
+1

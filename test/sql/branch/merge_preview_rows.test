@@ -33,6 +33,12 @@ statement ok
 INSERT INTO m VALUES (1), (2), (3)
 
 statement ok
+CREATE TABLE renamed(x INTEGER)
+
+statement ok
+INSERT INTO renamed VALUES (5)
+
+statement ok
 CREATE TABLE unchanged(v INTEGER)
 
 statement ok
@@ -49,6 +55,9 @@ INSERT INTO s.t VALUES ('a')
 
 statement ok
 CREATE VIEW v AS SELECT 1 AS one
+
+statement ok
+CREATE TABLE dropped(i INTEGER)
 
 statement ok
 CREATE BRANCH b
@@ -71,12 +80,24 @@ DELETE FROM m WHERE i = 2
 statement ok
 INSERT INTO m VALUES (4)
 
+statement ok
+CREATE TABLE created AS SELECT range AS r FROM range(2)
+
+statement ok
+ALTER TABLE renamed RENAME TO renamed_branch
+
+statement ok
+INSERT INTO renamed_branch VALUES (6)
+
 # an update that changes no value
 statement ok
 UPDATE unchanged SET v = v WHERE v = 1
 
 statement ok
 INSERT INTO s.t VALUES ('b')
+
+statement ok
+DROP TABLE dropped
 
 statement ok
 SET BRANCH main
@@ -101,6 +122,18 @@ FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'm')
 ----
 delete	1	ok	2
 insert	NULL	ok	4
+
+# a table the branch created, and one it renamed: by their names on the branch
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'created')
+----
+insert	NULL	ok	0
+insert	NULL	ok	1
+
+query IIII
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'renamed_branch')
+----
+insert	NULL	ok	6
 
 # a table in another schema
 query IIII
@@ -129,6 +162,11 @@ FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, schema => 's', tabl
 insert	NULL	ok	b
 
 # what cannot be shown row by row
+statement error
+FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'dropped')
+----
+Table "main.dropped" does not exist on branch "b"
+
 statement error
 FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'missing')
 ----

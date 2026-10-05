@@ -1989,7 +1989,7 @@ DuckLakeTransaction &DuckLakeTransaction::Get(ClientContext &context, Catalog &c
 }
 
 void DuckLakeTransaction::CreateEntry(unique_ptr<CatalogEntry> entry) {
-	DuckLakeBranching::EnsureNotOnBranch(*this, "CREATE");
+	DuckLakeBranching::CheckCreate(*this, *entry);
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	auto &set = GetOrCreateTransactionLocalEntries(*entry);
 	if (entry->type == CatalogType::SCHEMA_ENTRY) {
@@ -2118,7 +2118,7 @@ bool DuckLakeTransaction::FileIsDropped(const string &path) const {
 }
 
 void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
-	DuckLakeBranching::EnsureNotOnBranch(*this, "DROP");
+	DuckLakeBranching::CheckDrop(*this, entry);
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	switch (entry.type) {
 	case CatalogType::TABLE_ENTRY:
@@ -2198,7 +2198,7 @@ bool DuckLakeTransaction::IsRenamed(CatalogEntry &entry) {
 }
 
 void DuckLakeTransaction::AlterEntry(CatalogEntry &entry, unique_ptr<CatalogEntry> new_entry) {
-	DuckLakeBranching::EnsureNotOnBranch(*this, "ALTER");
+	DuckLakeBranching::CheckAlter(*this, entry, new_entry.get());
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	if (!new_entry) {
 		return;
@@ -2333,11 +2333,13 @@ DuckLakeCatalogSet &DuckLakeTransaction::GetOrCreateTransactionLocalEntries(Cata
 }
 
 optional_ptr<DuckLakeCatalogSet> DuckLakeTransaction::GetTransactionLocalSchemas() {
+	DuckLakeBranching::EnsureLoaded(*this);
 	return state->new_schemas;
 }
 
 optional_ptr<CatalogEntry>
 DuckLakeTransaction::GetTransactionLocalSchema(optional_ptr<const DuckLakeSchemaEntry> parent, const string &name) {
+	DuckLakeBranching::EnsureLoaded(*this);
 	if (!state->new_schemas) {
 		return nullptr;
 	}
@@ -2468,6 +2470,7 @@ DuckLakeViewEntry &DuckLakeTransaction::GetTransactionView(DuckLakeViewEntry &vi
 }
 
 idx_t DuckLakeTransaction::GetCatalogVersion() {
+	DuckLakeBranching::EnsureLoaded(*this);
 	if (catalog_version > 0) {
 		return catalog_version;
 	}

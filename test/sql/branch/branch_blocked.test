@@ -23,35 +23,108 @@ statement ok
 INSERT INTO t VALUES (1)
 
 statement ok
+CREATE VIEW main_view AS SELECT i FROM t
+
+statement ok
+CREATE MACRO main_macro(x) AS x + 1
+
+statement ok
 CREATE BRANCH b
 
 statement ok
 SET BRANCH b
 
-statement error
-CREATE TABLE t2(i INTEGER)
-----
-not supported on a branch yet
-
+# catalog changes to main's tables and views, other than renames and drops
 statement error
 ALTER TABLE t ADD COLUMN j INTEGER
 ----
-not supported on a branch yet
+Changing a main table other than renaming it is not supported on a branch yet (current branch: "b")
 
 statement error
-DROP TABLE t
+ALTER TABLE t RENAME COLUMN i TO k
 ----
-not supported on a branch yet
+Changing a main table other than renaming it is not supported on a branch yet
 
 statement error
-CREATE VIEW v AS SELECT 1
+ALTER TABLE t ALTER COLUMN i SET DEFAULT 1
 ----
-not supported on a branch yet
+Changing a main table other than renaming it is not supported on a branch yet
 
 statement error
-CREATE SCHEMA s
+ALTER TABLE t ALTER COLUMN i TYPE BIGINT
 ----
-not supported on a branch yet
+Changing a main table other than renaming it is not supported on a branch yet
+
+statement error
+ALTER TABLE t SET PARTITIONED BY (i)
+----
+Changing a main table other than renaming it is not supported on a branch yet
+
+statement error
+COMMENT ON TABLE t IS 'x'
+----
+Changing a main table other than renaming it is not supported on a branch yet
+
+statement error
+COMMENT ON VIEW main_view IS 'x'
+----
+Changing a main view other than renaming it is not supported on a branch yet
+
+# what a table created on the branch cannot have
+statement error
+CREATE TABLE partitioned(i INTEGER) PARTITIONED BY (i)
+----
+CREATE TABLE ... PARTITIONED BY is not supported on a branch yet
+
+statement error
+CREATE TABLE sorted(i INTEGER) SORTED BY (i)
+----
+CREATE TABLE ... SORTED BY is not supported on a branch yet
+
+statement error
+CREATE TABLE with_options(i INTEGER) WITH (parquet_compression = 'zstd')
+----
+CREATE TABLE ... WITH options is not supported on a branch yet
+
+# changes to a table created on the branch that do not keep its column ids
+statement ok
+CREATE TABLE mine(i INTEGER, j INTEGER, s STRUCT(a INTEGER))
+
+statement error
+ALTER TABLE mine DROP COLUMN j
+----
+DROP COLUMN is not supported on a branch yet
+
+statement error
+ALTER TABLE mine ALTER COLUMN i TYPE BIGINT
+----
+Changing a column type or its struct fields is not supported on a branch yet
+
+statement error
+ALTER TABLE mine ADD COLUMN s.b INTEGER
+----
+Changing a column type or its struct fields is not supported on a branch yet
+
+statement error
+ALTER TABLE mine SET PARTITIONED BY (i)
+----
+SET PARTITIONED BY is not supported on a branch yet
+
+statement error
+ALTER TABLE mine SET SORTED BY (i)
+----
+SET SORTED BY is not supported on a branch yet
+
+# macros
+statement error
+CREATE MACRO branch_macro(x) AS x + 2
+----
+CREATE MACRO is not supported on a branch yet
+
+statement error
+DROP MACRO main_macro
+----
+DROP MACRO is not supported on a branch yet
 
 statement error
 SELECT * FROM t AT (VERSION => 1)
@@ -104,3 +177,21 @@ query I
 SELECT SUM(i) FROM t
 ----
 1
+
+# a view's column comments: setting one binds the view, which a branch does not do while it loads
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_v11' AS v11 (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/branch_blocked_v11_files')
+
+statement ok
+CALL ducklake_create_branch('v11', 'vb')
+
+statement ok
+CALL ducklake_set_branch('v11', 'vb')
+
+statement ok
+CREATE VIEW v11.branch_view AS SELECT 1 AS one
+
+statement error
+COMMENT ON COLUMN v11.branch_view.one IS 'x'
+----
+COMMENT ON COLUMN of a view is not supported on a branch yet
