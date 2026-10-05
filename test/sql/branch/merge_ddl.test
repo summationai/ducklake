@@ -1,0 +1,430 @@
+# name: test/sql/branch/merge_ddl.test
+# description: merging a branch's catalog changes: created objects reach main with their data, paths and column ids
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_ddl_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE keep(i INTEGER)
+
+statement ok
+INSERT INTO keep VALUES (1)
+
+statement ok
+CREATE TABLE doomed(i INTEGER)
+
+statement ok
+INSERT INTO doomed VALUES (1)
+
+statement ok
+CREATE TABLE renamed_main(i INTEGER)
+
+statement ok
+INSERT INTO renamed_main VALUES (10)
+
+statement ok
+CREATE VIEW doomed_view AS SELECT 1 AS one
+
+statement ok
+CREATE VIEW renamed_view AS SELECT 2 AS two
+
+statement ok
+CREATE SCHEMA old_s
+
+statement ok
+CREATE TABLE old_s.inside(x INTEGER)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE s.x(id INTEGER, label VARCHAR DEFAULT 'none', info STRUCT(a INTEGER))
+
+statement ok
+INSERT INTO s.x VALUES (1, 'one', {'a': 1})
+
+statement ok
+ALTER TABLE s.x ADD COLUMN score INTEGER DEFAULT 5
+
+statement ok
+INSERT INTO s.x (id) VALUES (2)
+
+statement ok
+COMMENT ON TABLE s.x IS 'x table'
+
+statement ok
+COMMENT ON COLUMN s.x.label IS 'x label'
+
+statement ok
+CREATE TABLE c AS SELECT range AS r FROM range(3)
+
+statement ok
+DELETE FROM c WHERE r = 1
+
+statement ok
+CREATE VIEW s.v AS SELECT id FROM s.x
+
+statement ok
+COMMENT ON VIEW s.v IS 'x view'
+
+statement ok
+DROP TABLE doomed
+
+statement ok
+ALTER TABLE renamed_main RENAME TO renamed_new
+
+statement ok
+INSERT INTO renamed_new VALUES (11)
+
+statement ok
+DROP VIEW doomed_view
+
+statement ok
+ALTER VIEW renamed_view RENAME TO renamed_view_new
+
+statement ok
+DROP SCHEMA old_s CASCADE
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main
+old_s
+
+statement ok
+MERGE BRANCH b
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	c
+main	keep
+main	renamed_new
+s	x
+
+query II
+SELECT schema_name, view_name FROM duckdb_views() WHERE database_name = 'ducklake' AND NOT internal ORDER BY ALL
+----
+main	renamed_view_new
+s	v
+
+query IIII
+SELECT * FROM s.x ORDER BY id
+----
+1	one	{'a': 1}	5
+2	none	NULL	5
+
+query I
+FROM c ORDER BY r
+----
+0
+2
+
+query I
+FROM s.v ORDER BY id
+----
+1
+2
+
+query I
+FROM renamed_new ORDER BY i
+----
+10
+11
+
+query I
+FROM renamed_view_new
+----
+2
+
+query T
+SELECT comment FROM duckdb_tables() WHERE database_name = 'ducklake' AND table_name = 'x'
+----
+x table
+
+query T
+SELECT comment FROM duckdb_views() WHERE database_name = 'ducklake' AND view_name = 'v'
+----
+x view
+
+query TT
+SELECT ct.key, ct.value FROM ducklake_meta.ducklake_column_tag ct JOIN ducklake_meta.ducklake_column c ON ct.table_id = c.table_id AND ct.column_id = c.column_id WHERE c.column_name = 'label' AND ct.end_snapshot IS NULL AND c.end_snapshot IS NULL
+----
+comment	x label
+
+# one snapshot holds all of it
+query T
+SELECT map_keys(changes) FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
+----
+[schemas_created, schemas_dropped, tables_created, views_created, tables_dropped, tables_altered, tables_inserted_into, views_dropped, views_altered]
+
+query T
+SELECT changes['tables_created'] FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
+----
+[main.c, main.renamed_new, s.x]
+
+# the tables keep the paths and the column ids the branch wrote its files with
+query TTT
+SELECT t.table_name, t.path, t.path_is_relative::BOOLEAN FROM ducklake_meta.ducklake_table t WHERE t.end_snapshot IS NULL ORDER BY t.table_name
+----
+c	c/	true
+keep	keep/	true
+renamed_new	renamed_main/	true
+x	x/	true
+
+query TT
+SELECT schema_name, path FROM ducklake_meta.ducklake_schema WHERE end_snapshot IS NULL ORDER BY schema_name
+----
+main	main/
+s	s/
+
+query I
+SELECT COUNT(*) FROM glob('{DATA_PATH}/merge_ddl_files/s/x/*.parquet')
+----
+2
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file f JOIN ducklake_meta.ducklake_table t USING (table_id) WHERE t.table_name = 'x' AND f.path_is_relative AND f.end_snapshot IS NULL
+----
+2
+
+query ITTT
+SELECT c.column_id, c.column_name, c.initial_default, c.parent_column FROM ducklake_meta.ducklake_column c JOIN ducklake_meta.ducklake_table t USING (table_id) WHERE t.table_name = 'x' AND c.end_snapshot IS NULL AND t.end_snapshot IS NULL ORDER BY c.column_id
+----
+1	id	NULL	NULL
+2	label	none	NULL
+3	info	NULL	NULL
+4	a	NULL	3
+5	score	5	NULL
+
+# a column added on main after the merge takes the next id
+statement ok
+ALTER TABLE s.x ADD COLUMN after_merge INTEGER
+
+query I
+SELECT MAX(c.column_id) FROM ducklake_meta.ducklake_column c JOIN ducklake_meta.ducklake_table t USING (table_id) WHERE t.table_name = 'x' AND c.column_name = 'after_merge'
+----
+6
+
+query I
+SELECT COUNT(*) FROM s.x WHERE after_merge IS NULL
+----
+2
+
+# the merge removes the branch's catalog rows
+query III
+SELECT (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_object), (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_column), (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_main_change)
+----
+0	0	0
+
+# time travel to before the merge shows main as it was
+query I
+SELECT i FROM renamed_main AT (VERSION => 10)
+----
+10
+
+statement error
+SELECT * FROM s.x AT (VERSION => 10)
+----
+does not exist
+
+# and a restart reads the merged catalog
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_ddl_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+query IIIII
+SELECT * FROM s.x ORDER BY id
+----
+1	one	{'a': 1}	5	NULL
+2	none	NULL	5	NULL
+
+query I
+FROM s.v ORDER BY id
+----
+1
+2
+
+# dropping a branch with catalog changes removes its rows and queues the files of the tables it created
+statement ok
+CREATE BRANCH dropped_branch
+
+statement ok
+SET BRANCH dropped_branch
+
+statement ok
+CREATE TABLE throwaway AS SELECT range AS r FROM range(10)
+
+statement ok
+DROP TABLE keep
+
+statement ok
+SET BRANCH main
+
+statement ok
+DROP BRANCH dropped_branch
+
+query III
+SELECT (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_object), (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_column), (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_main_change)
+----
+0	0	0
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE path LIKE '%throwaway%'
+----
+1
+
+query I
+FROM keep
+----
+1
+
+# a branch that only drops a table of main
+statement ok
+CREATE BRANCH drop_only
+
+statement ok
+SET BRANCH drop_only
+
+statement ok
+DROP TABLE c
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH drop_only
+
+statement error
+FROM c
+----
+does not exist
+
+# nested schemas, on a lake with 1.1 metadata
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/merge_ddl_nested_files', METADATA_CATALOG 'nested_meta')
+
+statement ok
+CREATE SCHEMA nested.outer_s
+
+statement ok
+CALL ducklake_create_branch('nested', 'nb')
+
+statement ok
+CALL ducklake_set_branch('nested', 'nb')
+
+statement ok
+CREATE SCHEMA nested.outer_s.inner_s
+
+statement ok
+CREATE SCHEMA nested.mine
+
+statement ok
+CREATE SCHEMA nested.mine.deeper
+
+statement ok
+CREATE TABLE nested.mine.deeper.answers AS SELECT 42 AS answer
+
+statement ok
+CREATE TABLE nested.outer_s.inner_s.u AS SELECT 7 AS x
+
+statement ok
+CALL ducklake_set_branch('nested', 'main')
+
+statement ok
+CALL ducklake_merge_branch('nested', 'nb')
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'nested' ORDER BY ALL
+----
+deeper	answers
+inner_s	u
+
+query I
+FROM nested.mine.deeper.answers
+----
+42
+
+query I
+FROM nested.outer_s.inner_s.u
+----
+7
+
+query I
+SELECT COUNT(*) FROM nested_meta.ducklake_schema WHERE end_snapshot IS NULL AND parent_schema_id IS NOT NULL
+----
+2
+
+# a table the branch renamed merges row by row with main's changes to its rows, read under its name on the branch
+statement ok
+CREATE TABLE ducklake.rows_renamed(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO ducklake.rows_renamed VALUES ('a', 1), ('b', 2), ('c', 3)
+
+statement ok
+CREATE BRANCH rename_rows
+
+statement ok
+SET BRANCH rename_rows
+
+statement ok
+ALTER TABLE ducklake.rows_renamed RENAME TO rows_renamed_branch
+
+statement ok
+UPDATE ducklake.rows_renamed_branch SET price = 10 WHERE item = 'a'
+
+statement ok
+SET BRANCH main
+
+statement ok
+DELETE FROM ducklake.rows_renamed WHERE item = 'c'
+
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'rename_rows', dry_run => true) WHERE object_type = 'table'
+----
+rows_renamed	ok
+
+query IIIII
+FROM ducklake_merge_branch('ducklake', 'rename_rows', dry_run => true, table_name => 'rows_renamed_branch')
+----
+update_preimage	0	ok	a	1
+update_postimage	0	ok	a	10
+
+statement ok
+MERGE BRANCH rename_rows
+
+query TI
+FROM ducklake.rows_renamed_branch ORDER BY item
+----
+a	10
+b	2

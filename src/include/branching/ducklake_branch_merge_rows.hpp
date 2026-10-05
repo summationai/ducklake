@@ -45,7 +45,10 @@ struct DuckLakeMergeRowsBindData {
 	string catalog_name;
 	string branch_name;
 	string schema_name;
+	//! The table's name on the branch
 	string table_name;
+	//! Its name at the fork; empty for a table the branch created
+	string fork_table_name;
 	idx_t fork_snapshot_id = 0;
 	//! Main's head when the dry run started, which the row-by-row merge rules compare against
 	idx_t head_snapshot_id = 0;

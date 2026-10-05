@@ -1,0 +1,131 @@
+# name: test/sql/branch/ddl_old_lake.test
+# description: a lake whose branch tables predate the tables for catalog changes gets them with its first catalog change
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_old_lake_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+CREATE BRANCH later
+
+statement ok
+CREATE BRANCH dropped
+
+statement ok
+CREATE BRANCH merged
+
+# what a lake made before branches had catalog changes looks like
+statement ok
+DROP TABLE ducklake_meta.ducklake_branching_object
+
+statement ok
+DROP TABLE ducklake_meta.ducklake_branching_column
+
+statement ok
+DROP TABLE ducklake_meta.ducklake_branching_main_change
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_old_lake_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+# branches without catalog changes work as before
+statement ok
+DROP BRANCH dropped
+
+statement ok
+SET BRANCH merged
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH merged
+
+query I
+SELECT SUM(i) FROM t
+----
+3
+
+statement error
+SELECT * FROM ducklake_meta.ducklake_branching_object
+----
+does not exist
+
+# the first catalog change on a branch creates the tables
+statement ok
+SET BRANCH later
+
+statement ok
+INSERT INTO t VALUES (10)
+
+statement ok
+CREATE TABLE x AS SELECT 42 AS answer
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_object
+----
+1
+
+query I
+FROM x
+----
+42
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_old_lake_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH later
+
+query I
+FROM x
+----
+42
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH later
+
+query II
+SELECT (SELECT SUM(i) FROM t), (SELECT answer FROM x)
+----
+13	42
