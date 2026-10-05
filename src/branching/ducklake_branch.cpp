@@ -1236,6 +1236,286 @@ void DuckLakeBranchManager::CheckMerge(DuckLakeTransaction &transaction, const D
 	CheckRowMergeTablesUnchanged(transaction, merge);
 }
 
+//===--------------------------------------------------------------------===//
+// Merge preview
+//===--------------------------------------------------------------------===//
+namespace {
+
+void AddChange(vector<string> &result, const set<TableIndex> &tables, TableIndex table_id, const char *label) {
+	if (tables.find(table_id) == tables.end()) {
+		return;
+	}
+	if (std::find(result.begin(), result.end(), label) == result.end()) {
+		result.emplace_back(label);
+	}
+}
+
+vector<string> DescribeChanges(const TransactionChangeInformation &changes, TableIndex table_id) {
+	vector<string> result;
+	AddChange(result, changes.tables_inserted_into, table_id, "inserted_into");
+	AddChange(result, changes.tables_inserted_inlined, table_id, "inserted_inlined");
+	AddChange(result, changes.tables_deleted_from, table_id, "deleted_from");
+	AddChange(result, changes.tables_deleted_inlined, table_id, "deleted_inlined");
+	AddChange(result, changes.tables_flushed_inlined, table_id, "flushed_inlined");
+	AddChange(result, changes.altered_tables, table_id, "altered");
+	AddChange(result, changes.dropped_tables, table_id, "dropped");
+	AddChange(result, changes.tables_compacted, table_id, "compacted");
+	AddChange(result, changes.tables_merge_adjacent, table_id, "compacted");
+	AddChange(result, changes.tables_rewrite_delete, table_id, "compacted");
+	return result;
+}
+
+vector<string> DescribeChanges(const SnapshotChangeInformation &changes, TableIndex table_id) {
+	vector<string> result;
+	AddChange(result, changes.inserted_tables, table_id, "inserted_into");
+	AddChange(result, changes.tables_inserted_inlined, table_id, "inserted_inlined");
+	AddChange(result, changes.tables_deleted_from, table_id, "deleted_from");
+	AddChange(result, changes.tables_deleted_inlined, table_id, "deleted_inlined");
+	AddChange(result, changes.tables_flushed_inlined, table_id, "flushed_inlined");
+	AddChange(result, changes.altered_tables, table_id, "altered");
+	AddChange(result, changes.dropped_tables, table_id, "dropped");
+	AddChange(result, changes.tables_compacted, table_id, "compacted");
+	AddChange(result, changes.tables_merge_adjacent, table_id, "compacted");
+	AddChange(result, changes.tables_rewrite_delete, table_id, "compacted");
+	return result;
+}
+
+//! The transaction's changes limited to one table, so the conflict rules can be run for that table alone
+TransactionChangeInformation RestrictToTable(const TransactionChangeInformation &changes, TableIndex table_id) {
+	TransactionChangeInformation result;
+	auto keep = [&](const set<TableIndex> &from, set<TableIndex> &to) {
+		if (from.find(table_id) != from.end()) {
+			to.insert(table_id);
+		}
+	};
+	keep(changes.altered_tables, result.altered_tables);
+	keep(changes.altered_tables_with_schema_version_changes, result.altered_tables_with_schema_version_changes);
+	keep(changes.altered_views, result.altered_views);
+	keep(changes.dropped_tables, result.dropped_tables);
+	keep(changes.dropped_views, result.dropped_views);
+	keep(changes.tables_inserted_into, result.tables_inserted_into);
+	keep(changes.tables_deleted_from, result.tables_deleted_from);
+	keep(changes.tables_delete_attempted, result.tables_delete_attempted);
+	keep(changes.tables_inserted_inlined, result.tables_inserted_inlined);
+	keep(changes.tables_deleted_inlined, result.tables_deleted_inlined);
+	keep(changes.tables_flushed_inlined, result.tables_flushed_inlined);
+	keep(changes.tables_compacted, result.tables_compacted);
+	keep(changes.tables_merge_adjacent, result.tables_merge_adjacent);
+	keep(changes.tables_rewrite_delete, result.tables_rewrite_delete);
+	return result;
+}
+
+//! Takes the loaded branch out of the transaction again when the preview returns or fails
+struct LoadedBranchDiscard {
+	explicit LoadedBranchDiscard(DuckLakeTransaction &transaction) : transaction(transaction) {
+	}
+	~LoadedBranchDiscard() {
+		DuckLakeBranchManager::DiscardLoadedBranch(transaction);
+	}
+
+	DuckLakeTransaction &transaction;
+};
+
+} // namespace
+
+void DuckLakeBranchManager::DiscardLoadedBranch(DuckLakeTransaction &transaction) {
+	// everything LoadBranch touches; the transaction had no changes before, so clearing restores it
+	auto &state = *transaction.state;
+	state.local_changes.Clear();
+	state.dropped_files.clear();
+	state.dropped_file_stats.clear();
+	state.tables_deleted_from.clear();
+	state.tables_delete_attempted.clear();
+}
+
+vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTransaction &transaction,
+                                                                      const string &name) {
+	// a dry run loads the branch into its transaction, which the scans of one query share and may run in parallel
+	// (a UNION ALL of dry runs under an ORDER BY): dry runs take turns
+	static mutex preview_lock;
+	lock_guard<mutex> preview_guard(preview_lock);
+	if (IsOnBranch(transaction)) {
+		throw InvalidInputException("Cannot preview a merge while on a branch - run SET BRANCH main first");
+	}
+	if (IsMergingBranch(transaction) || transaction.ChangesMade()) {
+		throw InvalidInputException("ducklake_merge_branch(dry_run => true) needs a transaction without other changes");
+	}
+	auto branch = GetActiveBranch(transaction, name);
+	if (!branch) {
+		throw InvalidInputException("Branch \"%s\" does not exist", name);
+	}
+	auto fork_snapshot = GetForkSnapshot(transaction, *branch);
+	EnsureSnapshotsSinceFork(transaction, *branch);
+
+	auto context_ref = transaction.context.lock();
+	auto &context = *context_ref;
+	auto &catalog = transaction.GetCatalog();
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto &state = *transaction.state;
+	auto &local_changes = state.local_changes;
+
+	// the branch is loaded the way a merge loads it, and removed from the transaction again before returning
+	LoadedBranchDiscard discard(transaction);
+	DuckLakeLoadedBranch loaded;
+	LoadBranch(transaction, *branch, *fork_snapshot, loaded, false);
+
+	map<TableIndex, DuckLakeMergePreviewEntry> entries;
+	auto get_entry = [&](TableIndex table_id) -> DuckLakeMergePreviewEntry & {
+		auto existing = entries.find(table_id);
+		if (existing != entries.end()) {
+			return existing->second;
+		}
+		auto &table = GetTableAtFork(transaction, *fork_snapshot, table_id, name);
+		auto &entry = entries[table_id];
+		entry.table_id = table_id;
+		entry.schema_name = table.ParentSchema().name.GetIdentifierName();
+		entry.table_name = table.name.GetIdentifierName();
+		return entry;
+	};
+
+	// rows the branch adds: its data files, minus the rows it deleted from them again
+	for (auto &change : local_changes.Changes()) {
+		for (auto &file : change.GetTableChanges().new_data_files) {
+			idx_t deleted = file.delete_files.empty() ? 0 : file.delete_files.back().delete_count;
+			if (deleted >= file.row_count) {
+				// left out of main, as the merge does
+				continue;
+			}
+			auto &entry = get_entry(change.GetTableIndex());
+			entry.rows_inserted += file.row_count - deleted;
+			entry.files_added++;
+		}
+	}
+
+	// rows the branch removes from main: deletes on main files, main files it emptied, and inlined rows
+	map<TableIndex, vector<reference<const DuckLakeLoadedBranch::MainDelete>>> deletes_per_table;
+	for (auto &main_delete : loaded.main_deletes) {
+		deletes_per_table[main_delete.table_id].push_back(main_delete);
+	}
+	map<TableIndex, vector<idx_t>> dropped_per_table;
+	for (auto &dropped : loaded.dropped_files) {
+		dropped_per_table[dropped.second].push_back(dropped.first);
+	}
+	set<TableIndex> deleting_tables;
+	for (auto &entry : deletes_per_table) {
+		deleting_tables.insert(entry.first);
+	}
+	for (auto &entry : dropped_per_table) {
+		deleting_tables.insert(entry.first);
+	}
+	for (auto &table_id : deleting_tables) {
+		auto &entry = get_entry(table_id);
+		auto &table = GetTableAtFork(transaction, *fork_snapshot, table_id, name);
+		auto main_files = metadata_manager.GetExtendedFilesForTable(table, *fork_snapshot, nullptr);
+		unordered_map<idx_t, reference<DuckLakeFileListExtendedEntry>> files_by_id;
+		for (auto &file : main_files) {
+			if (file.file_id.IsValid()) {
+				files_by_id.emplace(file.file_id.index, file);
+			}
+		}
+		auto inlined_deletions = metadata_manager.ReadInlinedFileDeletions(table_id, *fork_snapshot);
+		auto find_main_file = [&](idx_t file_id) -> DuckLakeFileListExtendedEntry & {
+			auto file_entry = files_by_id.find(file_id);
+			if (file_entry == files_by_id.end()) {
+				throw InvalidInputException("Branch \"%s\" deleted from data file %d, which is not visible at its fork",
+				                            name, file_id);
+			}
+			return file_entry->second.get();
+		};
+		for (auto &main_delete_ref : deletes_per_table[table_id]) {
+			auto &main_delete = main_delete_ref.get();
+			auto &main_file = find_main_file(main_delete.data_file_id);
+			auto deletes = AnalyseMainDelete(context, local_changes, table_id, main_delete, main_file,
+			                                 FindInlinedPositions(inlined_deletions, main_delete.data_file_id),
+			                                 *fork_snapshot, true);
+			entry.rows_deleted += deletes.branch_only.size();
+		}
+		for (auto &file_id : dropped_per_table[table_id]) {
+			// the branch deleted every row main had not deleted already
+			auto &main_file = find_main_file(file_id);
+			MainFileDeletes deletes;
+			LoadMainDeletes(context, main_file, FindInlinedPositions(inlined_deletions, file_id), *fork_snapshot,
+			                deletes);
+			auto already_deleted = deletes.main_positions.size() + deletes.inlined_count;
+			entry.rows_deleted += main_file.row_count > already_deleted ? main_file.row_count - already_deleted : 0;
+		}
+	}
+	for (auto &table_entry : loaded.inlined_deletes) {
+		auto &entry = get_entry(table_entry.first);
+		for (auto &inlined : table_entry.second) {
+			entry.rows_deleted += inlined.second.size();
+		}
+	}
+
+	// the checks the merge commit runs, table by table so that every conflict is reported
+	auto changes = transaction.GetTransactionChanges();
+	auto executor = [&](string query) -> unique_ptr<QueryResult> {
+		auto result = metadata_manager.Query(*fork_snapshot, query);
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to preview the merge of a DuckLake branch: ");
+		}
+		return result;
+	};
+	auto other_changes = MainChangesSince(transaction, *fork_snapshot);
+	// the tables both sides changed rows of merge row by row, as the merge decides them
+	auto row_merge = FindRowMergeTables(transaction, loaded, *fork_snapshot, other_changes);
+	auto head_snapshot = transaction.GetSnapshot();
+	for (auto &table : row_merge) {
+		PlanRowMerge(context, catalog.GetName().GetIdentifierName(), name, branch->fork_snapshot_id,
+		             head_snapshot.snapshot_id, table.second);
+	}
+	// the rules compare the transaction's delete files and dropped files with main's, so they see one table at a time
+	auto all_local_changes = std::move(local_changes.changes);
+	auto all_dropped_files = std::move(state.dropped_files);
+	vector<DuckLakeMergePreviewEntry> result;
+	for (auto &entry_pair : entries) {
+		auto table_id = entry_pair.first;
+		auto &entry = entry_pair.second;
+		local_changes.changes.clear();
+		auto table_local_changes = all_local_changes.find(table_id);
+		if (table_local_changes != all_local_changes.end()) {
+			local_changes.changes.emplace(table_id, std::move(table_local_changes->second));
+		}
+		state.dropped_files.clear();
+		for (auto &dropped : all_dropped_files) {
+			auto dropped_table = loaded.dropped_files.find(dropped.second.index);
+			if (dropped_table != loaded.dropped_files.end() && dropped_table->second == table_id) {
+				state.dropped_files.insert(dropped);
+			}
+		}
+		auto table_changes = RestrictToTable(changes, table_id);
+		entry.branch_changes = DescribeChanges(table_changes, table_id);
+		entry.main_changes = DescribeChanges(other_changes, table_id);
+		auto row_merged = row_merge.find(table_id);
+		if (row_merged != row_merge.end()) {
+			ExcludeFromInsertDeleteRules(table_id, table_changes);
+		}
+		try {
+			state.CheckForConflicts(table_changes, other_changes, *fork_snapshot, executor);
+			CheckMergeOnlyConflicts(name, table_changes.tables_deleted_from, other_changes);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (error.Type() != ExceptionType::TRANSACTION) {
+				throw;
+			}
+			entry.conflict = error.RawMessage();
+		}
+		if (row_merged != row_merge.end() && entry.conflict.empty() && !row_merged->second.conflicts.empty()) {
+			entry.conflict = RowConflictMessage(name, row_merged->second);
+		}
+		if (table_local_changes != all_local_changes.end()) {
+			table_local_changes->second = std::move(local_changes.changes[table_id]);
+		}
+		result.push_back(std::move(entry));
+	}
+	local_changes.changes = std::move(all_local_changes);
+	state.dropped_files = std::move(all_dropped_files);
+	std::sort(result.begin(), result.end(), [](const DuckLakeMergePreviewEntry &a, const DuckLakeMergePreviewEntry &b) {
+		return std::tie(a.schema_name, a.table_name) < std::tie(b.schema_name, b.table_name);
+	});
+	return result;
+}
+
 string DuckLakeBranchManager::MergeBookkeepingSql(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
                                                   bool with_snapshot) {
 	auto &info = merge.loaded.info;

@@ -1,0 +1,357 @@
+# name: test/sql/branch/merge_preview.test
+# description: ducklake_merge_branch(dry_run => true) reports what a merge would do without changing anything
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_preview_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# d has a main delete file at the fork, e has two files, m holds inlined rows
+statement ok
+CREATE TABLE d(i INTEGER)
+
+statement ok
+INSERT INTO d SELECT range FROM range(100)
+
+statement ok
+DELETE FROM d WHERE i < 10
+
+statement ok
+CREATE TABLE e(i INTEGER)
+
+statement ok
+INSERT INTO e SELECT range FROM range(50)
+
+statement ok
+INSERT INTO e SELECT range FROM range(50, 100)
+
+statement ok
+CREATE TABLE m(i INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'm')
+
+statement ok
+INSERT INTO m VALUES (1), (2), (3)
+
+statement ok
+CREATE BRANCH z
+
+statement ok
+SET BRANCH z
+
+statement ok
+DELETE FROM d WHERE i >= 10 AND i < 30
+
+statement ok
+UPDATE d SET i = i + 1000 WHERE i = 99
+
+# a file inserted and emptied again on the branch is not part of the merge
+statement ok
+INSERT INTO d VALUES (500)
+
+statement ok
+DELETE FROM d WHERE i = 500
+
+# the first file of e is emptied, the second untouched
+statement ok
+DELETE FROM e WHERE i < 50
+
+statement ok
+INSERT INTO e VALUES (1000), (1001)
+
+statement ok
+DELETE FROM m WHERE i = 2
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+statement ok
+SET VARIABLE scheduled = (SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion)
+
+# exact row counts: only the branch's own deletes count, main's deletes at the fork do not
+query IIIIIIIII
+CALL ducklake_merge_branch('ducklake', 'z', dry_run => true)
+----
+main	d	ok	NULL	1	21	1	[inserted_into, deleted_from]	[]
+main	e	ok	NULL	2	50	1	[inserted_into, deleted_from]	[]
+main	m	ok	NULL	0	1	0	[deleted_inlined]	[]
+
+query IIIIIIIII
+SELECT * FROM ducklake_merge_branch('ducklake', 'z', dry_run => true)
+----
+main	d	ok	NULL	1	21	1	[inserted_into, deleted_from]	[]
+main	e	ok	NULL	2	50	1	[inserted_into, deleted_from]	[]
+main	m	ok	NULL	0	1	0	[deleted_inlined]	[]
+
+# nothing changed: no snapshot, no scheduled files, main and the branch read as before
+query I
+SELECT MAX(snapshot_id) = getvariable('head') FROM ducklake_snapshots('ducklake')
+----
+true
+
+query I
+SELECT COUNT(*) = getvariable('scheduled') FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+true
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_delete_file
+----
+1
+
+query III
+SELECT (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM e), (SELECT COUNT(*) FROM m)
+----
+90	100	3
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+1
+
+statement ok
+SET BRANCH z
+
+query III
+SELECT (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM e), (SELECT COUNT(*) FROM m)
+----
+70	52	2
+
+# the dry run runs from main only
+statement error
+CALL ducklake_merge_branch('ducklake', 'z', dry_run => true)
+----
+Cannot preview a merge while on a branch
+
+statement ok
+SET BRANCH main
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'missing', dry_run => true)
+----
+does not exist
+
+# author and message are accepted, so the real call can be tried first
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'z', author => 'maya', message => 'repricing', dry_run => true)
+----
+3
+
+# inside a transaction the preview leaves no trace either
+statement ok
+BEGIN
+
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'z', dry_run => true)
+----
+3
+
+query I
+SELECT COUNT(*) FROM d
+----
+90
+
+statement ok
+COMMIT
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO d VALUES (7)
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'z', dry_run => true)
+----
+without other changes
+
+statement ok
+ROLLBACK
+
+# a branch without commits has nothing to show
+statement ok
+CREATE BRANCH empty
+
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'empty', dry_run => true)
+----
+0
+
+# the merge does what the preview said
+statement ok
+MERGE BRANCH z
+
+query III
+SELECT (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM e), (SELECT COUNT(*) FROM m)
+----
+70	52	2
+
+# conflicts, table by table
+statement ok
+CREATE TABLE a(i INTEGER)
+
+statement ok
+INSERT INTO a SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE b(i INTEGER)
+
+statement ok
+INSERT INTO b SELECT range FROM range(100)
+
+statement ok
+INSERT INTO b SELECT range FROM range(100, 200)
+
+statement ok
+CREATE TABLE c(i INTEGER)
+
+statement ok
+INSERT INTO c SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE f(i INTEGER)
+
+statement ok
+INSERT INTO f SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE u(i INTEGER)
+
+statement ok
+INSERT INTO u SELECT range FROM range(100)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'u')
+
+statement ok
+CREATE BRANCH x
+
+statement ok
+CREATE BRANCH y
+
+statement ok
+SET BRANCH x
+
+statement ok
+DELETE FROM a WHERE i < 10
+
+statement ok
+DELETE FROM b WHERE i < 10
+
+statement ok
+INSERT INTO c VALUES (1000)
+
+statement ok
+INSERT INTO f VALUES (1000)
+
+statement ok
+DELETE FROM u WHERE i < 10
+
+statement ok
+SET BRANCH y
+
+statement ok
+DELETE FROM b WHERE i >= 10 AND i < 20
+
+statement ok
+SET BRANCH main
+
+# main: deletes from the same file of a, from the other file of b, inserts into c, drops f, deletes inline from u
+statement ok
+DELETE FROM a WHERE i >= 90
+
+statement ok
+DELETE FROM b WHERE i >= 190
+
+statement ok
+INSERT INTO c VALUES (2000)
+
+statement ok
+DROP TABLE f
+
+statement ok
+DELETE FROM u WHERE i = 50
+
+query IIIIIIII
+SELECT table_name, status, regexp_replace(conflict, '[0-9]+', '#', 'g'), rows_inserted, rows_deleted, files_added, branch_changes, main_changes_since_fork FROM ducklake_merge_branch('ducklake', 'x', dry_run => true)
+----
+a	ok	NULL	0	10	0	[deleted_from]	[deleted_from]
+b	ok	NULL	0	10	0	[deleted_from]	[deleted_from]
+c	ok	NULL	1	0	1	[inserted_into]	[inserted_into]
+f	conflict	Transaction conflict - attempting to insert into table with index "#" - but another transaction has dropped it	1	0	1	[inserted_into]	[dropped]
+u	ok	NULL	0	10	0	[deleted_from]	[deleted_inlined]
+
+query IIII
+SELECT table_name, status, rows_deleted, main_changes_since_fork FROM ducklake_merge_branch('ducklake', 'y', dry_run => true)
+----
+b	ok	10	[deleted_from]
+
+# the scans of one query share its transaction, and run in parallel here: the dry runs take turns
+query TTTII
+SELECT 'x', table_name, status, rows_inserted, rows_deleted FROM ducklake_merge_branch('ducklake', 'x', dry_run => true) UNION ALL SELECT 'y', table_name, status, rows_inserted, rows_deleted FROM ducklake_merge_branch('ducklake', 'y', dry_run => true) ORDER BY ALL
+----
+x	a	ok	0	10
+x	b	ok	0	10
+x	c	ok	1	0
+x	f	conflict	1	0
+x	u	ok	0	10
+y	b	ok	0	10
+
+# the merges agree with the previews
+query III
+CALL ducklake_merge_branch('ducklake', 'y', dry_run => false)
+----
+y	20	1
+
+query I
+SELECT COUNT(*) FROM b
+----
+180
+
+statement ok
+SET VARIABLE scheduled = (SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion)
+
+statement error
+MERGE BRANCH x
+----
+conflict
+
+# y's merge deleted other rows of the file x deleted from: b still merges row by row
+query III
+SELECT table_name, status, main_changes_since_fork FROM ducklake_merge_branch('ducklake', 'x', dry_run => true)
+----
+a	ok	[deleted_from]
+b	ok	[deleted_from]
+c	ok	[inserted_into]
+f	conflict	[dropped]
+u	ok	[deleted_inlined]
+
+# the failed merge and the previews left nothing behind
+query I
+SELECT COUNT(*) = getvariable('scheduled') FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+true
+
+query I
+SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake') WHERE commit_message LIKE 'MERGE BRANCH x%'
+----
+NULL
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+2
