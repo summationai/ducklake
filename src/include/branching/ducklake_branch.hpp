@@ -11,6 +11,7 @@
 #include "common/ducklake_snapshot.hpp"
 #include "common/index.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/enums/catalog_type.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -18,6 +19,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context_state.hpp"
 
+#include <functional>
 #include <thread>
 
 namespace duckdb {
@@ -32,6 +34,7 @@ struct DuckLakeFileListExtendedEntry;
 struct DuckLakeInlinedTableInfo;
 struct DuckLakeSnapshotCommit;
 struct SnapshotChangeInformation;
+struct TransactionChangeInformation;
 class DuckLakeDelete;
 
 struct DuckLakeBranchInfo {
@@ -90,6 +93,27 @@ struct DuckLakeLoadedBranch {
 	vector<MainDelete> main_deletes;
 };
 
+//! A table both sides changed rows of since the fork, merged row by row: where to read it, and what the merge does to
+//! the rows both sides touched
+struct DuckLakeRowMergeTable {
+	TableIndex table_id;
+	string schema_name;
+	//! Its name on main and on the branch
+	string main_name;
+	string branch_name;
+	//! The rows both sides touched since the fork, rewrites with the old values included
+	set<int64_t> overlap;
+	//! The rows both sides changed differently
+	vector<int64_t> conflicts;
+	//! The rows both sides changed the same way
+	set<int64_t> same_as_main;
+	//! The branch's copies of rows main's copy stays for: branch data file -> positions
+	map<string, set<idx_t>> branch_rows_to_drop;
+	//! Main's copies of rows the branch's change wins for: data file or inlined table at main's head -> (position,
+	//! row id)
+	map<string, vector<pair<idx_t, int64_t>>> main_rows_to_drop;
+};
+
 //! A branch being merged into main by the current transaction
 struct DuckLakeBranchMerge {
 	DuckLakeLoadedBranch loaded;
@@ -98,6 +122,10 @@ struct DuckLakeBranchMerge {
 	vector<pair<idx_t, string>> files_to_schedule;
 	//! The transaction's changes once the merge was prepared - nothing may be added before it commits
 	string changes_fingerprint;
+	//! Main's head the merge was planned on
+	DuckLakeSnapshot head_snapshot;
+	//! The tables merged row by row
+	map<TableIndex, DuckLakeRowMergeTable> row_merge;
 };
 
 //! Branch state of one DuckLake transaction, held by the transaction as an opaque pointer
@@ -190,9 +218,37 @@ public:
 	                              const DuckLakeFileListExtendedEntry &data_file_info, set<idx_t> deletes,
 	                              DuckLakeDeleteFile &delete_file);
 
+	//===--------------------------------------------------------------------===//
+	// Row-by-row merge (ducklake_branch_row_merge.cpp)
+	//===--------------------------------------------------------------------===//
+	//! Main's changes in the snapshots after the given one
+	static SnapshotChangeInformation MainChangesSince(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot);
+	//! The tables both sides changed rows of that merge row by row; the others keep DuckLake's table-level rules
+	static map<TableIndex, DuckLakeRowMergeTable> FindRowMergeTables(DuckLakeTransaction &transaction,
+	                                                                 const DuckLakeLoadedBranch &loaded,
+	                                                                 DuckLakeSnapshot fork_snapshot,
+	                                                                 const SnapshotChangeInformation &main_changes);
+	//! The ids among the given tables (or views), at least one, that main renamed since the fork
+	static set<TableIndex> RenamedOnMain(DuckLakeTransaction &transaction, bool views, const set<TableIndex> &ids,
+	                                     idx_t fork_snapshot_id);
+	//! Why main's changes to a table since the fork keep it out of the row-by-row merge, if they do
+	static bool KeepsTableLevelRules(TableIndex table_id, bool branch_deleted, bool branch_deleted_inlined,
+	                                 const SnapshotChangeInformation &main_changes);
+	//! Reads both sides' changes to the table since the fork and decides each row both touched
+	static void PlanRowMerge(ClientContext &context, const string &catalog_name, const string &branch_name,
+	                         idx_t fork_snapshot_id, idx_t head_snapshot_id, DuckLakeRowMergeTable &table);
+	static string RowConflictMessage(const string &branch_name, const DuckLakeRowMergeTable &table);
+	//! Fails on rows the two sides changed differently; leaves out the branch's copies of rows main's copy stays for
+	static void ApplyRowMerge(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
+	//! Takes a table merged row by row out of DuckLake's insert and delete rules
+	static void ExcludeFromInsertDeleteRules(TableIndex table_id, TransactionChangeInformation &changes);
+	//! Fails the merge when main changed a table merged row by row after the merge was planned
+	static void CheckRowMergeTablesUnchanged(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge);
+
 private:
 	static void RebaseMainDeletes(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
 	static void DropFullyDeletedBranchFiles(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
+	static void ForgetFilesMainEmptied(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
 };
 
 } // namespace duckdb
