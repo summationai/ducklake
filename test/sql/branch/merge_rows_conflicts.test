@@ -144,6 +144,11 @@ SELECT table_name, conflict FROM ducklake_merge_branch('ducklake', 'table_level'
 altered	Transaction conflict - attempting to delete from table with index "3" - but another transaction has altered it
 dropped	Transaction conflict - attempting to delete from table with index "4" - but another transaction has dropped it
 
+query IIII
+FROM ducklake_merge_branch('ducklake', 'table_level', dry_run => true, table_name => 'altered')
+----
+delete	0	table conflict	1
+
 statement error
 MERGE BRANCH table_level
 ----
