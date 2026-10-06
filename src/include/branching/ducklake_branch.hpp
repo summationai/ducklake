@@ -129,6 +129,25 @@ struct DuckLakeBranchDefinitionChanges {
 
 //! A table both sides changed rows of since the fork, merged row by row: where to read it, and what the merge does to
 //! the rows both sides touched
+//! What a merge does with rows both sides changed differently since the fork
+enum class DuckLakeConflictResolution : uint8_t {
+	//! the merge fails, naming the rows
+	FAIL,
+	//! main's version of each such row stays, and the branch's change to it is dropped
+	KEEP_MAIN,
+	//! the branch's version of each such row replaces main's
+	KEEP_BRANCH
+};
+
+//! One row both sides changed differently: its values at the fork, on the branch and on main (none when deleted)
+struct DuckLakeRowConflict {
+	vector<Value> fork;
+	vector<Value> branch;
+	vector<Value> main;
+	bool on_branch = false;
+	bool on_main = false;
+};
+
 struct DuckLakeRowMergeTable {
 	TableIndex table_id;
 	string schema_name;
@@ -137,8 +156,16 @@ struct DuckLakeRowMergeTable {
 	string branch_name;
 	//! The rows both sides touched since the fork, rewrites with the old values included
 	set<int64_t> overlap;
-	//! The rows both sides changed differently
+	//! What to do with rows both sides changed differently
+	DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL;
+	//! Whether planning keeps each conflicting row's values (the dry run shows them)
+	bool keep_conflict_values = false;
+	//! The rows both sides changed differently that fail the merge
 	vector<int64_t> conflicts;
+	//! The rows both sides changed differently that on_conflict resolved
+	set<int64_t> resolved;
+	//! Every row both sides changed differently, with its values when keep_conflict_values is set
+	map<int64_t, DuckLakeRowConflict> conflict_rows;
 	//! The rows both sides changed the same way
 	set<int64_t> same_as_main;
 	//! The branch's copies of rows main's copy stays for: branch data file -> positions
@@ -224,12 +251,17 @@ public:
 	                       DuckLakeSnapshot fork_snapshot, DuckLakeLoadedBranch &loaded, bool for_merge = false);
 	//! Prepares the current main transaction to merge the branch when it commits
 	static DuckLakeBranchInfo PrepareMerge(DuckLakeTransaction &transaction, const string &name,
-	                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info);
+	                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info,
+	                                       DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL);
 	//! Runs with every conflict check of a merge commit
 	static void CheckMerge(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
 	                       const SnapshotChangeInformation &other_changes);
 	//! Reports what MERGE BRANCH would do, table by table, without changing anything
-	static vector<DuckLakeMergePreviewEntry> PreviewMerge(DuckLakeTransaction &transaction, const string &name);
+	static vector<DuckLakeMergePreviewEntry>
+	PreviewMerge(DuckLakeTransaction &transaction, const string &name,
+	             DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL);
+	//! Reads the on_conflict option: 'fail', 'main' or 'branch'
+	static DuckLakeConflictResolution ParseConflictResolution(const string &value);
 	//! Removes a loaded branch from the transaction again; only valid when the transaction had no changes before
 	static void DiscardLoadedBranch(DuckLakeTransaction &transaction);
 	//! The SQL that records the merge; part of the merge commit's batch

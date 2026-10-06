@@ -267,7 +267,33 @@ void DuckLakeBranchManager::PlanRowMerge(ClientContext &context, const string &c
 		auto branch_changed = !SameRow(branch, fork);
 		auto main_changed = !SameRow(main, fork);
 		if (branch_changed && main_changed && !SameRow(branch, main)) {
-			table.conflicts.push_back(row_id);
+			auto &conflict = table.conflict_rows[row_id];
+			conflict.on_branch = branch.present;
+			conflict.on_main = main.present;
+			if (table.keep_conflict_values) {
+				conflict.fork = fork.values;
+				conflict.branch = branch.values;
+				conflict.main = main.values;
+			}
+			switch (table.on_conflict) {
+			case DuckLakeConflictResolution::KEEP_MAIN:
+				// as when both made the same change: the branch's copy goes, its deletes repeat main's
+				if (branch.present) {
+					table.branch_rows_to_drop[branch.file].insert(branch.position);
+				}
+				table.resolved.insert(row_id);
+				break;
+			case DuckLakeConflictResolution::KEEP_BRANCH:
+				// as when main only rewrote the row: main's copy goes
+				if (main.present) {
+					table.main_rows_to_drop[main.file].emplace_back(main.position, row_id);
+				}
+				table.resolved.insert(row_id);
+				break;
+			default:
+				table.conflicts.push_back(row_id);
+				break;
+			}
 			continue;
 		}
 		if (branch_changed && !main_changed) {
@@ -285,6 +311,19 @@ void DuckLakeBranchManager::PlanRowMerge(ClientContext &context, const string &c
 	}
 }
 
+DuckLakeConflictResolution DuckLakeBranchManager::ParseConflictResolution(const string &value) {
+	if (StringUtil::CIEquals(value, "fail")) {
+		return DuckLakeConflictResolution::FAIL;
+	}
+	if (StringUtil::CIEquals(value, "main")) {
+		return DuckLakeConflictResolution::KEEP_MAIN;
+	}
+	if (StringUtil::CIEquals(value, "branch")) {
+		return DuckLakeConflictResolution::KEEP_BRANCH;
+	}
+	throw InvalidInputException("on_conflict must be 'fail', 'main' or 'branch', not '%s'", value);
+}
+
 string DuckLakeBranchManager::RowConflictMessage(const string &branch_name, const DuckLakeRowMergeTable &table) {
 	static constexpr idx_t ROWS_SHOWN = 10;
 	vector<int64_t> shown(table.conflicts.begin(),
@@ -294,8 +333,9 @@ string DuckLakeBranchManager::RowConflictMessage(const string &branch_name, cons
 		rows += ", ...";
 	}
 	return StringUtil::Format("Transaction conflict - branch \"%s\" and main changed %d row(s) of table \"%s\" "
-	                          "differently since the fork (rowid %s); ducklake_merge_branch with dry_run => true and "
-	                          "table_name => '%s' shows them",
+	                          "differently since the fork (rowid %s); ducklake_merge_branch with dry_run => true, "
+	                          "table_name => '%s' and conflicts_only => true shows them, and on_conflict => 'main' or "
+	                          "'branch' resolves them",
 	                          branch_name, table.conflicts.size(), table.main_name, rows, table.branch_name);
 }
 
