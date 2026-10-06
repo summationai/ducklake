@@ -1,0 +1,385 @@
+# name: test/sql/branch/merge_rows_resolve.test
+# description: rows both sides changed differently: the conflicts view, and on_conflict keeping main's or the branch's version
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_resolve_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t_fail(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO t_fail VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5), ('f', 6)
+
+statement ok
+CREATE TABLE t_main(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO t_main VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5), ('f', 6)
+
+statement ok
+CREATE TABLE t_branch(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO t_branch VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5), ('f', 6)
+
+statement ok
+CREATE TABLE m_main(item VARCHAR, price INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'm_main')
+
+statement ok
+INSERT INTO m_main VALUES ('a', 1), ('b', 2), ('c', 3)
+
+statement ok
+CREATE TABLE m_branch(item VARCHAR, price INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'm_branch')
+
+statement ok
+INSERT INTO m_branch VALUES ('a', 1), ('b', 2), ('c', 3)
+
+statement ok
+CREATE BRANCH bf
+
+statement ok
+CREATE BRANCH bm
+
+statement ok
+CREATE BRANCH bb
+
+statement ok
+SET BRANCH bf
+
+statement ok
+UPDATE t_fail SET price = 10 WHERE item = 'a'
+
+statement ok
+UPDATE t_fail SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM t_fail WHERE item = 'c'
+
+statement ok
+UPDATE t_fail SET price = 40 WHERE item = 'd'
+
+statement ok
+SET BRANCH bm
+
+statement ok
+UPDATE t_main SET price = 10 WHERE item = 'a'
+
+statement ok
+UPDATE t_main SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM t_main WHERE item = 'c'
+
+statement ok
+UPDATE t_main SET price = 40 WHERE item = 'd'
+
+statement ok
+UPDATE m_main SET price = 10 WHERE item = 'a'
+
+statement ok
+UPDATE m_main SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM m_main WHERE item = 'c'
+
+statement ok
+UPDATE m_main SET price = 40 WHERE item = 'd'
+
+statement ok
+SET BRANCH bb
+
+statement ok
+UPDATE t_branch SET price = 10 WHERE item = 'a'
+
+statement ok
+UPDATE t_branch SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM t_branch WHERE item = 'c'
+
+statement ok
+UPDATE t_branch SET price = 40 WHERE item = 'd'
+
+statement ok
+UPDATE m_branch SET price = 10 WHERE item = 'a'
+
+statement ok
+UPDATE m_branch SET price = 20 WHERE item = 'b'
+
+statement ok
+DELETE FROM m_branch WHERE item = 'c'
+
+statement ok
+UPDATE m_branch SET price = 40 WHERE item = 'd'
+
+statement ok
+SET BRANCH main
+
+# main changes the same rows differently, and a row of its own
+statement ok
+UPDATE t_fail SET price = 11 WHERE item = 'a'
+
+statement ok
+DELETE FROM t_fail WHERE item = 'b'
+
+statement ok
+UPDATE t_fail SET price = 33 WHERE item = 'c'
+
+statement ok
+UPDATE t_fail SET price = 55 WHERE item = 'e'
+
+statement ok
+UPDATE t_main SET price = 11 WHERE item = 'a'
+
+statement ok
+DELETE FROM t_main WHERE item = 'b'
+
+statement ok
+UPDATE t_main SET price = 33 WHERE item = 'c'
+
+statement ok
+UPDATE t_main SET price = 55 WHERE item = 'e'
+
+statement ok
+UPDATE t_branch SET price = 11 WHERE item = 'a'
+
+statement ok
+DELETE FROM t_branch WHERE item = 'b'
+
+statement ok
+UPDATE t_branch SET price = 33 WHERE item = 'c'
+
+statement ok
+UPDATE t_branch SET price = 55 WHERE item = 'e'
+
+statement ok
+UPDATE m_main SET price = 11 WHERE item = 'a'
+
+statement ok
+DELETE FROM m_main WHERE item = 'b'
+
+statement ok
+UPDATE m_main SET price = 33 WHERE item = 'c'
+
+statement ok
+UPDATE m_main SET price = 55 WHERE item = 'e'
+
+statement ok
+UPDATE m_branch SET price = 11 WHERE item = 'a'
+
+statement ok
+DELETE FROM m_branch WHERE item = 'b'
+
+statement ok
+UPDATE m_branch SET price = 33 WHERE item = 'c'
+
+statement ok
+UPDATE m_branch SET price = 55 WHERE item = 'e'
+
+# the conflicts: what each side did, and the row at the fork, on the branch and on main
+query ITTTTTT
+FROM ducklake_merge_branch('ducklake', 'bf', dry_run => true, table_name => 't_fail', conflicts_only => true)
+----
+0	update	update	conflict	{'item': a, 'price': 1}	{'item': a, 'price': 10}	{'item': a, 'price': 11}
+1	update	delete	conflict	{'item': b, 'price': 2}	{'item': b, 'price': 20}	NULL
+2	delete	update	conflict	{'item': c, 'price': 3}	NULL	{'item': c, 'price': 33}
+
+query I
+SELECT main.price FROM ducklake_merge_branch('ducklake', 'bf', dry_run => true, table_name => 't_fail', conflicts_only => true) WHERE main_change = 'update' ORDER BY rowid
+----
+11
+33
+
+statement error
+MERGE BRANCH bf
+----
+changed 3 row(s) of table "t_fail" differently since the fork (rowid 0, 1, 2); ducklake_merge_branch with dry_run => true, table_name => 't_fail' and conflicts_only => true shows them, and on_conflict => 'main' or 'branch' resolves them
+
+# on_conflict in the dry run: the table merges, and each conflicting row says who wins
+query TTT
+SELECT table_name, status, conflict FROM ducklake_merge_branch('ducklake', 'bm', dry_run => true, on_conflict => 'main') ORDER BY table_name
+----
+m_main	ok	NULL
+t_main	ok	NULL
+
+query TTI
+SELECT change_type, merge_status, COUNT(*) FROM ducklake_merge_branch('ducklake', 'bm', dry_run => true, table_name => 't_main', on_conflict => 'main') GROUP BY ALL ORDER BY ALL
+----
+delete	main wins	1
+update_postimage	main wins	2
+update_postimage	ok	1
+update_preimage	main wins	2
+update_preimage	ok	1
+
+query ITT
+SELECT rowid, branch_change, resolution FROM ducklake_merge_branch('ducklake', 'bb', dry_run => true, table_name => 't_branch', conflicts_only => true, on_conflict => 'branch') ORDER BY rowid
+----
+0	update	branch wins
+1	update	branch wins
+2	delete	branch wins
+
+# keep main: main's version of each conflicting row stays, the rest of the branch merges
+statement ok
+MERGE BRANCH bm ON CONFLICT KEEP MAIN
+
+query TI
+FROM t_main ORDER BY item
+----
+a	11
+c	33
+d	40
+e	55
+f	6
+
+query TI
+FROM m_main ORDER BY item
+----
+a	11
+c	33
+
+# keep branch: the branch's version replaces main's, its deletes included
+query TTT
+SELECT table_name, status, conflict FROM ducklake_merge_branch('ducklake', 'bb', dry_run => true, on_conflict => 'branch') ORDER BY table_name
+----
+m_branch	ok	NULL
+t_branch	ok	NULL
+
+statement ok
+CALL ducklake_merge_branch('ducklake', 'bb', on_conflict => 'branch')
+
+query TI
+FROM t_branch ORDER BY item
+----
+a	10
+b	20
+d	40
+e	55
+f	6
+
+query TI
+FROM m_branch ORDER BY item
+----
+a	10
+b	20
+
+query II
+SELECT (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM t_branch), (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM m_branch)
+----
+true	true
+
+# the failed merge left its branch as it was; on_conflict also takes fail
+statement error
+CALL ducklake_merge_branch('ducklake', 'bf', on_conflict => 'fail')
+----
+changed 3 row(s) of table "t_fail" differently
+
+query TI
+FROM t_fail ORDER BY item
+----
+a	11
+c	33
+d	4
+e	55
+f	6
+
+# what on_conflict and conflicts_only accept
+statement error
+CALL ducklake_merge_branch('ducklake', 'bf', on_conflict => 'theirs')
+----
+on_conflict must be 'fail', 'main' or 'branch', not 'theirs'
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'bf', dry_run => true, conflicts_only => true)
+----
+conflicts_only is only valid with dry_run => true and table_name
+
+statement error
+MERGE BRANCH bf ON CONFLICT KEEP
+----
+Expected MAIN or BRANCH after KEEP
+
+statement error
+MERGE BRANCH bf ON KEEP MAIN
+----
+Expected CONFLICT KEEP after ON
+
+# a table that conflicts as a whole is not resolved row by row
+statement ok
+CREATE TABLE altered(i INTEGER)
+
+statement ok
+INSERT INTO altered VALUES (1), (2)
+
+statement ok
+CREATE BRANCH ba
+
+statement ok
+SET BRANCH ba
+
+statement ok
+UPDATE altered SET i = 10 WHERE i = 1
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE altered SET i = 20 WHERE i = 2
+
+statement ok
+ALTER TABLE altered ADD COLUMN j INTEGER
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'ba', dry_run => true, table_name => 'altered', conflicts_only => true)
+----
+Table "altered" conflicts as a whole
+
+statement error
+MERGE BRANCH ba ON CONFLICT KEEP BRANCH
+----
+but another transaction has altered it
+
+# the merges left a restartable lake
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_resolve_files', METADATA_CATALOG 'ducklake_meta')
+
+query TI
+FROM ducklake.t_branch ORDER BY item
+----
+a	10
+b	20
+d	40
+e	55
+f	6
+
+query TI
+FROM ducklake.t_main ORDER BY item
+----
+a	11
+c	33
+d	40
+e	55
+f	6
