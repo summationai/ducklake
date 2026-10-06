@@ -1209,7 +1209,8 @@ void DuckLakeBranchManager::DropFullyDeletedBranchFiles(DuckLakeTransaction &tra
 }
 
 DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &transaction, const string &name,
-                                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info) {
+                                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info,
+                                                       DuckLakeConflictResolution on_conflict) {
 	if (IsOnBranch(transaction)) {
 		throw InvalidInputException("Cannot merge while on a branch - run SET BRANCH main first");
 	}
@@ -1235,6 +1236,7 @@ DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &tran
 	    FindRowMergeTables(transaction, merge->loaded, *fork_snapshot, MainChangesSince(transaction, *fork_snapshot));
 	auto context_ref = transaction.context.lock();
 	for (auto &table : merge->row_merge) {
+		table.second.on_conflict = on_conflict;
 		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName().GetIdentifierName(), branch->name,
 		             branch->fork_snapshot_id, merge->head_snapshot.snapshot_id, table.second);
 	}
@@ -1412,7 +1414,8 @@ void DuckLakeBranchManager::DiscardLoadedBranch(DuckLakeTransaction &transaction
 }
 
 vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTransaction &transaction,
-                                                                      const string &name) {
+                                                                      const string &name,
+                                                                      DuckLakeConflictResolution on_conflict) {
 	// a dry run loads the branch into its transaction, which the scans of one query share and may run in parallel
 	// (a UNION ALL of dry runs under an ORDER BY): dry runs take turns
 	static mutex preview_lock;
@@ -1598,6 +1601,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 	auto row_merge = FindRowMergeTables(transaction, loaded, *fork_snapshot, other_changes);
 	auto head_snapshot = transaction.GetSnapshot();
 	for (auto &table : row_merge) {
+		table.second.on_conflict = on_conflict;
 		PlanRowMerge(context, catalog.GetName().GetIdentifierName(), name, branch->fork_snapshot_id,
 		             head_snapshot.snapshot_id, table.second);
 	}
