@@ -15,6 +15,8 @@ struct DuckLakeBranchParseData : public ParserExtensionParseData {
 	string branch_name;
 	string source_branch;
 	bool if_exists = false;
+	//! MERGE BRANCH x ON CONFLICT KEEP MAIN | BRANCH: "main" or "branch"
+	string keep_on_conflict;
 
 	unique_ptr<ParserExtensionParseData> Copy() const override {
 		auto result = make_uniq<DuckLakeBranchParseData>();
@@ -22,6 +24,7 @@ struct DuckLakeBranchParseData : public ParserExtensionParseData {
 		result->branch_name = branch_name;
 		result->source_branch = source_branch;
 		result->if_exists = if_exists;
+		result->keep_on_conflict = keep_on_conflict;
 		return std::move(result);
 	}
 
@@ -37,7 +40,8 @@ struct DuckLakeBranchParseData : public ParserExtensionParseData {
 		case DuckLakeBranchStatementType::DROP_BRANCH:
 			return string("DROP BRANCH ") + (if_exists ? "IF EXISTS " : "") + name;
 		case DuckLakeBranchStatementType::MERGE_BRANCH:
-			return "MERGE BRANCH " + name;
+			return "MERGE BRANCH " + name +
+			       (keep_on_conflict.empty() ? string() : " ON CONFLICT KEEP " + StringUtil::Upper(keep_on_conflict));
 		default:
 			return "SET BRANCH " + name;
 		}
@@ -163,9 +167,21 @@ static ParserExtensionParseResult DuckLakeBranchParse(ParserExtensionInfo *info,
 			return ParserExtensionParseResult();
 		}
 		data->type = DuckLakeBranchStatementType::MERGE_BRANCH;
-		usage = "MERGE BRANCH <name>";
+		usage = "MERGE BRANCH <name> [ON CONFLICT KEEP MAIN | ON CONFLICT KEEP BRANCH]";
 		if (!reader.TryConsumeName(data->branch_name)) {
 			return BranchSyntaxError("Expected a branch name - usage: " + usage);
+		}
+		if (reader.TryConsumeWord("ON")) {
+			if (!reader.TryConsumeWord("CONFLICT") || !reader.TryConsumeWord("KEEP")) {
+				return BranchSyntaxError("Expected CONFLICT KEEP after ON - usage: " + usage);
+			}
+			if (reader.TryConsumeWord("MAIN")) {
+				data->keep_on_conflict = "main";
+			} else if (reader.TryConsumeWord("BRANCH")) {
+				data->keep_on_conflict = "branch";
+			} else {
+				return BranchSyntaxError("Expected MAIN or BRANCH after KEEP - usage: " + usage);
+			}
 		}
 	} else {
 		return ParserExtensionParseResult();
@@ -196,6 +212,10 @@ static ParserExtensionPlanResult DuckLakeBranchPlan(ParserExtensionInfo *info, C
 		break;
 	case DuckLakeBranchStatementType::MERGE_BRANCH:
 		result.function = DuckLakeBranchFunctions::GetMergeBranchFunction();
+		if (!data.keep_on_conflict.empty()) {
+			result.function.arguments.push_back(LogicalType::VARCHAR);
+			result.parameters.push_back(Value(data.keep_on_conflict));
+		}
 		break;
 	case DuckLakeBranchStatementType::DROP_BRANCH:
 		result.function = DuckLakeBranchFunctions::GetDropBranchFunction();

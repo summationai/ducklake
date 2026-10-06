@@ -13,6 +13,7 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/main/connection.hpp"
+#include "branching/ducklake_branch.hpp"
 
 namespace duckdb {
 class ClientContext;
@@ -59,8 +60,17 @@ struct DuckLakeMergeRowsBindData {
 	//! The rows both sides changed: differently, or main's copy stays
 	set<int64_t> conflict_rows;
 	set<int64_t> same_as_main_rows;
+	//! What the merge does with rows both sides changed differently, and the rows that resolves
+	DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL;
+	set<int64_t> resolved_rows;
+	//! conflicts_only: one output row per row both sides changed differently, with its three versions
+	bool conflicts_only = false;
+	vector<pair<int64_t, DuckLakeRowConflict>> conflict_details;
 	vector<string> column_names;
 	vector<LogicalType> column_types;
+
+	//! The table's row as one STRUCT
+	LogicalType RowType() const;
 };
 
 //! The rows a merge would insert, delete and update in one table, in the terms of ducklake_table_changes: the table
@@ -70,7 +80,8 @@ public:
 	DuckLakeMergeRowsScan(ClientContext &context, const DuckLakeMergeRowsBindData &data);
 
 	static DuckLakeMergeRowsBindData Bind(ClientContext &context, DuckLakeCatalog &catalog, const string &branch_name,
-	                                      const string &schema_name, const string &table_name);
+	                                      const string &schema_name, const string &table_name,
+	                                      DuckLakeConflictResolution on_conflict, bool conflicts_only);
 	//! Fills the output with the next changed rows; an empty output means the scan is done
 	void Scan(DataChunk &output);
 
@@ -78,6 +89,8 @@ private:
 	using Cursor = DuckLakeBranchRowCursor;
 
 	void Emit(DataChunk &output, idx_t &count, const char *change_type, const Cursor &cursor);
+	void ScanConflicts(DataChunk &output);
+	Value RowValue(const vector<Value> &values) const;
 	bool SameValues() const;
 	Value MergeStatus(const char *change_type, int64_t row_id) const;
 
@@ -88,6 +101,8 @@ private:
 	unique_ptr<Connection> main_connection;
 	Cursor branch_rows;
 	Cursor fork_rows;
+	//! conflicts_only: the next conflict to report
+	idx_t conflict_offset = 0;
 };
 
 } // namespace duckdb
