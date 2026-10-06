@@ -1209,7 +1209,8 @@ void DuckLakeBranchManager::DropFullyDeletedBranchFiles(DuckLakeTransaction &tra
 }
 
 DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &transaction, const string &name,
-                                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info) {
+                                                       optional_ptr<const DuckLakeSnapshotCommit> commit_info,
+                                                       DuckLakeConflictResolution on_conflict) {
 	if (IsOnBranch(transaction)) {
 		throw InvalidInputException("Cannot merge while on a branch - run SET BRANCH main first");
 	}
@@ -1235,6 +1236,7 @@ DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &tran
 	    FindRowMergeTables(transaction, merge->loaded, *fork_snapshot, MainChangesSince(transaction, *fork_snapshot));
 	auto context_ref = transaction.context.lock();
 	for (auto &table : merge->row_merge) {
+		table.second.on_conflict = on_conflict;
 		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName().GetIdentifierName(), branch->name,
 		             branch->fork_snapshot_id, merge->head_snapshot.snapshot_id, table.second);
 	}
@@ -1412,7 +1414,8 @@ void DuckLakeBranchManager::DiscardLoadedBranch(DuckLakeTransaction &transaction
 }
 
 vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTransaction &transaction,
-                                                                      const string &name) {
+                                                                      const string &name,
+                                                                      DuckLakeConflictResolution on_conflict) {
 	if (IsOnBranch(transaction)) {
 		throw InvalidInputException("Cannot preview a merge while on a branch - run SET BRANCH main first");
 	}
@@ -1426,13 +1429,15 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 	auto &preview_context = *connection.context;
 	vector<DuckLakeMergePreviewEntry> entries;
 	preview_context.RunFunctionInTransaction([&]() {
-		entries = LoadAndPreviewMerge(DuckLakeTransaction::Get(preview_context, transaction.GetCatalog()), name);
+		auto &preview_transaction = DuckLakeTransaction::Get(preview_context, transaction.GetCatalog());
+		entries = LoadAndPreviewMerge(preview_transaction, name, on_conflict);
 	});
 	return entries;
 }
 
 vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::LoadAndPreviewMerge(DuckLakeTransaction &transaction,
-                                                                             const string &name) {
+                                                                             const string &name,
+                                                                             DuckLakeConflictResolution on_conflict) {
 	auto branch = GetActiveBranch(transaction, name);
 	if (!branch) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
@@ -1608,6 +1613,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::LoadAndPreviewMerge(Duc
 	auto row_merge = FindRowMergeTables(transaction, loaded, *fork_snapshot, other_changes);
 	auto head_snapshot = transaction.GetSnapshot();
 	for (auto &table : row_merge) {
+		table.second.on_conflict = on_conflict;
 		PlanRowMerge(context, catalog.GetName().GetIdentifierName(), name, branch->fork_snapshot_id,
 		             head_snapshot.snapshot_id, table.second);
 	}
