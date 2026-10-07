@@ -247,6 +247,9 @@ SELECT branch_file_id, path, path_is_relative, NOW() FROM {METADATA_CATALOG}.duc
 		branch_tables.insert(branch_tables.end(), {"ducklake_branching_object", "ducklake_branching_column",
 		                                           "ducklake_branching_main_change"});
 	}
+	if (HasColumnChangeTable(transaction)) {
+		branch_tables.push_back("ducklake_branching_column_change");
+	}
 	for (auto &table : branch_tables) {
 		query += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %d;\n", table, id);
 	}
@@ -370,7 +373,7 @@ static void LoadFileDetails(DuckLakeTransaction &transaction, const DuckLakeBran
 		if (table_entry == table_entries.end()) {
 			table_entry =
 			    table_entries
-			        .emplace(table_id, DuckLakeBranchManager::GetTableEntry(transaction, fork_snapshot, table_id))
+			        .emplace(table_id, DuckLakeBranchManager::CurrentTableEntry(transaction, fork_snapshot, table_id))
 			        .first;
 		}
 		if (!table_entry->second) {
@@ -1231,9 +1234,11 @@ DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &tran
 	merge->fork_snapshot = *fork_snapshot;
 	LoadBranch(transaction, *branch, *fork_snapshot, merge->loaded, true);
 	merge->head_snapshot = transaction.GetSnapshot();
+	auto main_changes = MainChangesSince(transaction, *fork_snapshot);
+	// a column change main's own changes to the table rule out is reported before anything is written
+	CheckColumnChanges(transaction, branch->name, *fork_snapshot, ColumnChangedMainTables(transaction), main_changes);
 	// tables both sides changed rows of merge row by row
-	merge->row_merge =
-	    FindRowMergeTables(transaction, merge->loaded, *fork_snapshot, MainChangesSince(transaction, *fork_snapshot));
+	merge->row_merge = FindRowMergeTables(transaction, merge->loaded, *fork_snapshot, main_changes);
 	auto context_ref = transaction.context.lock();
 	for (auto &table : merge->row_merge) {
 		table.second.on_conflict = on_conflict;
@@ -1280,7 +1285,8 @@ void DuckLakeBranchManager::CheckMerge(DuckLakeTransaction &transaction, const D
 		deleted_from.erase(table.first);
 	}
 	CheckMergeOnlyConflicts(info.name, deleted_from, other_changes);
-	CheckMergeDefinitions(transaction, info.name, merge.fork_snapshot, other_changes);
+	CheckMergeDefinitions(transaction, info.name, merge.fork_snapshot, ColumnChangedMainTables(transaction),
+	                      other_changes);
 	CheckRowMergeTablesUnchanged(transaction, merge);
 }
 
@@ -1560,10 +1566,12 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 				AddLabel(add_entry(id, object).branch_changes, "created");
 				continue;
 			}
-			// the only change to a table or view of main that a branch makes in place
+			// a table or view of main the branch renamed, or changed the columns of (labelled with its changes below)
 			auto &entry = is_table ? get_entry(id) : add_entry(id, main_view(id));
-			entry.new_name = object.name.GetIdentifierName();
-			AddLabel(entry.branch_changes, "renamed");
+			if (object.name.GetIdentifierName() != entry.table_name) {
+				entry.new_name = object.name.GetIdentifierName();
+				AddLabel(entry.branch_changes, "renamed");
+			}
 		}
 	}
 	for (auto &table_id : state.dropped_tables) {
@@ -1622,9 +1630,10 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 	auto all_renamed_views = std::move(state.renamed_views);
 	auto check = [&](DuckLakeMergePreviewEntry &entry, const TransactionChangeInformation &object_changes) {
 		try {
+			// the branch's own rules first: they name the object, DuckLake's give its index
+			CheckMergeDefinitions(transaction, name, *fork_snapshot, object_changes.altered_tables, other_changes);
 			state.CheckForConflicts(object_changes, other_changes, *fork_snapshot, executor);
 			CheckMergeOnlyConflicts(name, object_changes.tables_deleted_from, other_changes);
-			CheckMergeDefinitions(transaction, name, *fork_snapshot, other_changes);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			if (error.Type() != ExceptionType::TRANSACTION) {
@@ -1757,6 +1766,9 @@ string DuckLakeBranchManager::MergeBookkeepingSql(DuckLakeTransaction &transacti
 	if (HasDefinitionTables(transaction)) {
 		branch_tables.insert(branch_tables.end(), {"ducklake_branching_object", "ducklake_branching_column",
 		                                           "ducklake_branching_main_change"});
+	}
+	if (merge.loaded.has_column_change_table) {
+		branch_tables.push_back("ducklake_branching_column_change");
 	}
 	for (auto &table : branch_tables) {
 		sql += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %d;\n", table, id);

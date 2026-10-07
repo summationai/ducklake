@@ -143,21 +143,52 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		table.schema_name = schema.name.GetIdentifierName();
 		table.main_name = entry->name.GetIdentifierName();
 		table.branch_name = table.main_name;
-		// a table renamed on the branch is read there under its new name
-		for (auto &schema_entry : state.new_tables) {
-			for (auto &local : schema_entry.second->GetEntries()) {
-				if (local.second->type == CatalogType::TABLE_ENTRY &&
-				    local.second->Cast<DuckLakeTableEntry>().GetTableId() == table_id) {
-					table.branch_name = local.second->name.GetIdentifierName();
-				}
-			}
+		// a table renamed on the branch is read there under its new name; one whose columns the branch changed is
+		// compared on the branch's columns
+		auto local_version = LocalTableVersion(transaction, table_id);
+		if (local_version) {
+			table.branch_name = local_version->name.GetIdentifierName();
+			ProjectColumns(*local_version, entry->Cast<DuckLakeTableEntry>(), table.branch_columns, table.main_columns);
 		}
 		result.emplace(table_id, std::move(table));
 	}
 	return result;
 }
 
+void DuckLakeBranchManager::ProjectColumns(const DuckLakeTableEntry &branch_version,
+                                           const DuckLakeTableEntry &main_version, vector<string> &branch_columns,
+                                           vector<string> &main_columns) {
+	auto &branch_fields = branch_version.GetFieldData();
+	auto &main_fields = main_version.GetFieldData();
+	bool same = branch_version.GetColumns().LogicalColumnCount() == main_version.GetColumns().LogicalColumnCount();
+	for (auto &column : branch_version.GetColumns().Logical()) {
+		auto &field = branch_fields.GetByRootIndex(column.Physical());
+		branch_columns.push_back(DuckLakeUtil::SQLIdentifierToString(column.Name().GetIdentifierName()));
+		auto main_field = main_fields.GetByFieldIndex(field.GetFieldIndex());
+		if (main_field) {
+			main_columns.push_back(DuckLakeUtil::SQLIdentifierToString(main_field->Name()));
+			continue;
+		}
+		// a column the branch added: main's rows read it as its initial default, as DuckLake's reader does
+		same = false;
+		auto &initial_default = field.GetColumnData().initial_default;
+		main_columns.push_back(StringUtil::Format(
+		    "CAST(%s AS %s) AS %s", initial_default.IsNull() ? string("NULL") : initial_default.ToSQLString(),
+		    column.Type().ToString(), branch_columns.back()));
+	}
+	if (same) {
+		// the same columns on both sides
+		branch_columns.clear();
+		main_columns.clear();
+	}
+}
+
 namespace {
+
+//! The select list of one side: its projected columns, or all of them
+string SelectList(const vector<string> &columns) {
+	return columns.empty() ? string("*") : StringUtil::Join(columns, ", ");
+}
 
 //! One row as one side has it
 struct RowCopy {
@@ -252,13 +283,15 @@ void DuckLakeBranchManager::PlanRowMerge(ClientContext &context, const string &c
 	// the rows both touched, as they were at the fork and as each side has them now
 	map<int64_t, RowCopy> at_fork, on_branch, on_main;
 	ReadRows(*main_connection,
-	         StringUtil::Format("SELECT rowid, * FROM %s AT (VERSION => %d)", main_table, fork_snapshot_id),
+	         StringUtil::Format("SELECT rowid, %s FROM %s AT (VERSION => %d)", SelectList(table.main_columns),
+	                            main_table, fork_snapshot_id),
 	         table.overlap, false, at_fork);
-	ReadRows(*branch_connection, "SELECT rowid, filename, file_row_number, * FROM " + branch_table, table.overlap, true,
-	         on_branch);
+	ReadRows(*branch_connection,
+	         "SELECT rowid, filename, file_row_number, " + SelectList(table.branch_columns) + " FROM " + branch_table,
+	         table.overlap, true, on_branch);
 	ReadRows(*main_connection,
-	         StringUtil::Format("SELECT rowid, filename, file_row_number, * FROM %s AT (VERSION => %d)", main_table,
-	                            head_snapshot_id),
+	         StringUtil::Format("SELECT rowid, filename, file_row_number, %s FROM %s AT (VERSION => %d)",
+	                            SelectList(table.main_columns), main_table, head_snapshot_id),
 	         table.overlap, true, on_main);
 	for (auto &row_id : table.overlap) {
 		auto &fork = at_fork[row_id];
