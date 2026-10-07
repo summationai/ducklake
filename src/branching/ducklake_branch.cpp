@@ -1685,7 +1685,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		}
 		check(entry, object_changes);
 		if (row_merged != row_merge.end() && entry.conflict.empty() && !row_merged->second.conflicts.empty()) {
-			entry.conflict = RowConflictMessage(name, row_merged->second);
+			entry.conflict =
+			    RowConflictMessage(transaction.GetCatalog().GetName().GetIdentifierName(), name, row_merged->second);
 		}
 		if (table_local_changes != all_local_changes.end()) {
 			table_local_changes->second = std::move(local_changes.changes[table_id]);
