@@ -19,6 +19,7 @@ public:
 	static TableFunction GetSetBranchFunction();
 	static TableFunction GetMergeBranchFunction();
 	static TableFunction GetBranchTableFunction();
+	static TableFunction GetCloseStaleBranchesFunction();
 };
 
 class DuckLakeCurrentBranchFunction : public DuckLakeBaseMetadataFunction {
