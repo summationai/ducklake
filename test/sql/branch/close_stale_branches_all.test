@@ -1,0 +1,119 @@
+# name: test/sql/branch/close_stale_branches_all.test
+# description: closing every branch with an older_than in the future, on every metadata catalog
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+require icu
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/close_stale_branches_all_files')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2)
+
+statement ok
+CREATE BRANCH b1
+
+statement ok
+CREATE BRANCH b2
+
+statement ok
+SET BRANCH b1
+
+statement ok
+INSERT INTO t VALUES (3)
+
+statement ok
+CREATE TABLE made AS SELECT 'x' AS s
+
+statement ok
+SET BRANCH main
+
+# two branches whose archive tables would get one name: the second gets _2, in a dry run too
+statement ok
+CREATE BRANCH pair
+
+statement ok
+CREATE BRANCH pair__x
+
+statement ok
+SET BRANCH pair
+
+statement ok
+CREATE TABLE x__t AS SELECT 1 AS a
+
+statement ok
+SET BRANCH pair__x
+
+statement ok
+INSERT INTO t VALUES (10)
+
+statement ok
+SET BRANCH main
+
+query III
+SELECT branch_name, status, [regexp_replace(x, '__[0-9]{8}', '__DATE') FOR x IN archived_tables] FROM ducklake_close_stale_branches('ducklake', older_than => NOW() + INTERVAL 1 DAY, dry_run => true)
+----
+b1	would close	[branch_archive.b1__made__DATE, branch_archive.b1__t__DATE]
+b2	would close	[]
+pair	would close	[branch_archive.pair__x__t__DATE]
+pair__x	would close	[branch_archive.pair__x__t__DATE_2]
+
+query IIII
+SELECT branch_name, status, [regexp_replace(x, '__[0-9]{8}', '__DATE') FOR x IN archived_tables], message FROM ducklake_close_stale_branches('ducklake', older_than => NOW() + INTERVAL 1 DAY)
+----
+b1	closed	[branch_archive.b1__made__DATE, branch_archive.b1__t__DATE]	NULL
+b2	closed	[]	NULL
+pair	closed	[branch_archive.pair__x__t__DATE]	NULL
+pair__x	closed	[branch_archive.pair__x__t__DATE_2]	NULL
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+0
+
+query II
+SELECT regexp_replace(table_name, '__[0-9]{8}', '__DATE'), regexp_extract(comment, 'branch "([^"]*)"', 1) FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' ORDER BY table_name
+----
+b1__made__DATE	b1
+b1__t__DATE	b1
+pair__x__t__DATE	pair
+pair__x__t__DATE_2	pair__x
+
+statement ok
+SET VARIABLE t_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND regexp_full_match(table_name, 'b1__t__[0-9]{8}'))
+
+query I
+SELECT SUM(i) FROM query_table(getvariable('t_archive'))
+----
+6
+
+query I
+SELECT SUM(i) FROM t
+----
+3
+
+statement ok
+SET VARIABLE pair_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND regexp_full_match(table_name, 'pair__x__t__[0-9]{8}_2'))
+
+query I
+SELECT SUM(i) FROM query_table(getvariable('pair_archive'))
+----
+13
+
+# the names are free again
+statement ok
+CREATE BRANCH b1

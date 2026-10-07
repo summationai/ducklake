@@ -1,0 +1,599 @@
+# name: test/sql/branch/close_stale_branches.test
+# description: ducklake_close_stale_branches archives the tables of branches without recent commits into main, then closes them
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+require icu
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/close_stale_branches_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# nothing to close in a lake without branches
+query I
+SELECT COUNT(*) FROM ducklake_close_stale_branches('ducklake', older_than => NOW())
+----
+0
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE t(i INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+statement ok
+CREATE TABLE w(i INTEGER, old INTEGER)
+
+statement ok
+INSERT INTO w VALUES (1, 10)
+
+statement ok
+CREATE TABLE r(i INTEGER)
+
+statement ok
+INSERT INTO r VALUES (7)
+
+statement ok
+CREATE TABLE gone(i INTEGER)
+
+statement ok
+CREATE TABLE s.st(i INTEGER)
+
+statement ok
+CREATE TABLE untouched(i INTEGER)
+
+# a branch nobody came back to, and one that never changed anything
+statement ok
+CREATE BRANCH old_work
+
+statement ok
+CREATE BRANCH idle
+
+statement ok
+SET BRANCH old_work
+
+statement ok
+INSERT INTO t VALUES (4, 'd')
+
+statement ok
+DELETE FROM t WHERE i = 1
+
+statement ok
+ALTER TABLE w ADD COLUMN added VARCHAR DEFAULT 'x'
+
+statement ok
+ALTER TABLE w DROP COLUMN old
+
+statement ok
+ALTER TABLE r RENAME TO r2
+
+statement ok
+CREATE TABLE made AS SELECT 42 AS answer
+
+statement ok
+INSERT INTO s.st VALUES (100)
+
+statement ok
+DROP TABLE gone
+
+statement ok
+CREATE VIEW v AS SELECT 1 AS one
+
+statement ok
+SET BRANCH main
+
+# main moves on, and two branches are in use
+statement ok
+INSERT INTO t VALUES (5, 'e')
+
+statement ok
+CREATE BRANCH fresh
+
+statement ok
+CREATE BRANCH revived
+
+statement ok
+SET BRANCH fresh
+
+statement ok
+INSERT INTO t VALUES (6, 'f')
+
+statement ok
+SET BRANCH revived
+
+statement ok
+INSERT INTO t VALUES (7, 'g')
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE old_work_id = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'old_work')
+
+statement ok
+SET VARIABLE old_fork = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'old_work')
+
+statement ok
+SET VARIABLE new_fork = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'fresh')
+
+statement ok
+SET VARIABLE old_work_commits = (SELECT commit_count FROM ducklake_branches('ducklake') WHERE branch_name = 'old_work')
+
+# old_work was last committed to 40 days ago, idle was created long ago and never committed to, revived was created
+# long ago and committed to today
+statement ok
+UPDATE ducklake_meta.ducklake_branching_branch SET created_at = NOW() - INTERVAL 60 DAY WHERE branch_name IN ('old_work', 'revived')
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_branch SET created_at = '2020-01-01 00:00:00+00' WHERE branch_name = 'idle'
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_commit SET commit_time = NOW() - INTERVAL 40 DAY WHERE branch_id = getvariable('old_work_id')
+
+# last_activity: the latest commit, or the creation when there is none
+query II
+SELECT branch_name, last_activity < NOW() - INTERVAL 30 DAY FROM ducklake_branches('ducklake') ORDER BY branch_id
+----
+old_work	true
+idle	true
+fresh	false
+revived	false
+
+query I
+SELECT last_activity = created_at FROM ducklake_branches('ducklake') WHERE branch_name = 'idle'
+----
+true
+
+# older_than is a strict bound
+statement ok
+SET VARIABLE idle_activity = (SELECT last_activity FROM ducklake_branches('ducklake') WHERE branch_name = 'idle')
+
+query I
+SELECT COUNT(*) FROM ducklake_close_stale_branches('ducklake', older_than => getvariable('idle_activity'), dry_run => true)
+----
+0
+
+query I
+SELECT branch_name FROM ducklake_close_stale_branches('ducklake', older_than => getvariable('idle_activity') + INTERVAL 1 SECOND, dry_run => true)
+----
+idle
+
+# a dry run lists the archive tables a close would create: dropped tables and views are not archived, a renamed table
+# keeps its name on the branch, and a table outside main is prefixed with its schema
+statement ok
+SET VARIABLE last_snapshot = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+query IIII
+SELECT branch_name, status, [regexp_replace(x, '__[0-9]{8}', '__DATE') FOR x IN archived_tables], message FROM ducklake_close_stale_branches('ducklake', older_than => NOW() - INTERVAL 30 DAY, dry_run => true)
+----
+old_work	would close	[branch_archive.old_work__made__DATE, branch_archive.old_work__r2__DATE, branch_archive.old_work__t__DATE, branch_archive.old_work__w__DATE, branch_archive.old_work__s__st__DATE]	NULL
+idle	would close	[]	NULL
+
+# and changes nothing
+query III
+SELECT (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake')) = getvariable('last_snapshot'), (SELECT COUNT(*) FROM ducklake_branches('ducklake')), (SELECT COUNT(*) FROM duckdb_schemas() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive')
+----
+true	4	0
+
+# while old_work is open, expiry keeps its fork
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake') WHERE snapshot_id = getvariable('old_fork')
+----
+1
+
+# the files old_work wrote
+statement ok
+CREATE TEMP TABLE old_work_files AS SELECT path FROM ducklake_meta.ducklake_branching_data_file WHERE branch_id = getvariable('old_work_id') UNION ALL SELECT path FROM ducklake_meta.ducklake_branching_delete_file WHERE branch_id = getvariable('old_work_id')
+
+query I
+SELECT COUNT(*) > 0 FROM old_work_files
+----
+true
+
+# another connection works on old_work
+statement ok con2
+USE ducklake
+
+statement ok con2
+SET BRANCH old_work
+
+query I con2
+SELECT COUNT(*) FROM t
+----
+3
+
+# close the stale branches
+query IIII
+SELECT branch_name, status, [regexp_replace(x, '__[0-9]{8}', '__DATE') FOR x IN archived_tables], message FROM ducklake_close_stale_branches('ducklake', older_than => NOW() - INTERVAL 30 DAY)
+----
+old_work	closed	[branch_archive.old_work__made__DATE, branch_archive.old_work__r2__DATE, branch_archive.old_work__t__DATE, branch_archive.old_work__w__DATE, branch_archive.old_work__s__st__DATE]	NULL
+idle	closed	[]	NULL
+
+# the archive tables hold the tables as the branch had them
+statement ok
+SET VARIABLE t_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND regexp_full_match(table_name, 'old_work__t__[0-9]{8}'))
+
+query II
+FROM query_table(getvariable('t_archive')) ORDER BY ALL
+----
+2	b
+3	c
+4	d
+
+statement ok
+SET VARIABLE w_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND regexp_full_match(table_name, 'old_work__w__[0-9]{8}'))
+
+query II
+SELECT i, added FROM query_table(getvariable('w_archive'))
+----
+1	x
+
+statement error
+SELECT old FROM query_table(getvariable('w_archive'))
+----
+not found
+
+statement ok
+SET VARIABLE r_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND regexp_full_match(table_name, 'old_work__r2__[0-9]{8}'))
+
+query I
+FROM query_table(getvariable('r_archive'))
+----
+7
+
+statement ok
+SET VARIABLE made_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND regexp_full_match(table_name, 'old_work__made__[0-9]{8}'))
+
+query I
+FROM query_table(getvariable('made_archive'))
+----
+42
+
+statement ok
+SET VARIABLE st_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND regexp_full_match(table_name, 'old_work__s__st__[0-9]{8}'))
+
+query I
+FROM query_table(getvariable('st_archive'))
+----
+100
+
+# each with where it came from
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND comment LIKE 'Archived from branch "old_work" (last activity %, fork snapshot ' || getvariable('old_fork') || ') on ____-__-__'
+----
+5
+
+# main is unchanged
+query II
+SELECT (SELECT SUM(i) FROM t), (SELECT COUNT(*) FROM gone)
+----
+11	0
+
+# the branches are closed: their history stays, ending with the close
+query II
+SELECT branch_name, status FROM ducklake_meta.ducklake_branching_branch ORDER BY branch_id
+----
+old_work	closed
+idle	closed
+fresh	active
+revived	active
+
+query I
+SELECT branch_name FROM ducklake_branches('ducklake') ORDER BY branch_id
+----
+fresh
+revived
+
+query II
+SELECT COUNT(*) = getvariable('old_work_commits') + 1, MAX(commit_seq) = getvariable('old_work_commits') + 1 FROM ducklake_meta.ducklake_branching_commit WHERE branch_id = getvariable('old_work_id')
+----
+true	true
+
+query IIIII
+SELECT changes_made = 'closed:' || (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake')), commit_message, commit_extra_info LIKE '{"branch": "old_work", "fork_snapshot_id": ' || getvariable('old_fork') || ', "branch_commits": ' || getvariable('old_work_commits') || ', "archived_tables": [%]}', len(regexp_extract_all(commit_extra_info, 'branch_archive')), commit_time > NOW() - INTERVAL 1 DAY FROM ducklake_meta.ducklake_branching_commit WHERE branch_id = getvariable('old_work_id') ORDER BY commit_seq DESC LIMIT 1
+----
+true	Close branch old_work	true	5	true
+
+# the archive tables and the close are one snapshot of main
+query I
+SELECT commit_message FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
+----
+Close branch old_work
+
+# a branch with nothing to archive is closed without a snapshot
+query II
+SELECT changes_made, commit_extra_info = '{"branch": "idle", "fork_snapshot_id": ' || getvariable('old_fork') || ', "branch_commits": 0, "archived_tables": []}' FROM ducklake_meta.ducklake_branching_commit WHERE branch_id = (SELECT branch_id FROM ducklake_meta.ducklake_branching_branch WHERE branch_name = 'idle')
+----
+closed	true
+
+# the bookkeeping of the closed branches is gone
+query I
+SELECT (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_data_file WHERE branch_id = getvariable('old_work_id')) + (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_object WHERE branch_id = getvariable('old_work_id')) + (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_column_change WHERE branch_id = getvariable('old_work_id')) + (SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_name WHERE branch_id = getvariable('old_work_id'))
+----
+0
+
+# a connection still on a closed branch is sent back to main
+statement error con2
+SELECT COUNT(*) FROM t
+----
+Branch "old_work" no longer exists - this connection is back on main
+
+query I con2
+SELECT COUNT(*) FROM t
+----
+4
+
+# old_work no longer holds back expiry
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake') WHERE snapshot_id = getvariable('old_fork')
+----
+0
+
+# its files are scheduled for deletion, and cleanup removes them
+query I
+SELECT COUNT(*) = (SELECT COUNT(*) FROM old_work_files) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904
+----
+true
+
+query I
+SELECT COUNT(*) = (SELECT COUNT(*) FROM old_work_files) FROM glob('{DATA_PATH}/close_stale_branches_files/**') g, old_work_files f WHERE ends_with(g.file, f.path)
+----
+true
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query I
+SELECT COUNT(*) FROM glob('{DATA_PATH}/close_stale_branches_files/**') g, old_work_files f WHERE ends_with(g.file, f.path)
+----
+0
+
+# the name is free again; archiving a second old_work the same day appends a number
+statement ok
+CREATE BRANCH old_work
+
+statement ok
+SET BRANCH old_work
+
+statement ok
+INSERT INTO t VALUES (8, 'h')
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_commit SET commit_time = NOW() - INTERVAL 40 DAY WHERE branch_id = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'old_work')
+
+query II
+SELECT branch_name, [regexp_replace(x, '__[0-9]{8}', '__DATE') FOR x IN archived_tables] FROM ducklake_close_stale_branches('ducklake', older_than => NOW() - INTERVAL 30 DAY)
+----
+old_work	[branch_archive.old_work__t__DATE_2]
+
+statement ok
+SET VARIABLE t2_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive' AND regexp_full_match(table_name, 'old_work__t__[0-9]{8}_2'))
+
+query I
+SELECT SUM(i) FROM query_table(getvariable('t2_archive'))
+----
+19
+
+# archive_schema puts the archive tables elsewhere
+statement ok
+CREATE BRANCH elsewhere
+
+statement ok
+SET BRANCH elsewhere
+
+statement ok
+INSERT INTO untouched VALUES (1)
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_commit SET commit_time = NOW() - INTERVAL 40 DAY WHERE branch_id = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'elsewhere')
+
+query III
+SELECT branch_name, status, [regexp_replace(x, '__[0-9]{8}', '__DATE') FOR x IN archived_tables] FROM ducklake_close_stale_branches('ducklake', older_than => NOW() - INTERVAL 30 DAY, archive_schema => 'attic')
+----
+elsewhere	closed	[attic.elsewhere__untouched__DATE]
+
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'attic'
+----
+1
+
+# where the call is refused
+statement error
+CALL ducklake_close_stale_branches('ducklake')
+----
+ducklake_close_stale_branches requires older_than
+
+statement error
+CALL ducklake_close_stale_branches('ducklake', older_than => NOW(), archive_schema => NULL)
+----
+archive_schema cannot be NULL or empty
+
+statement ok
+SET BRANCH fresh
+
+statement error
+CALL ducklake_close_stale_branches('ducklake', older_than => NOW())
+----
+Cannot close branches while on a branch - run SET BRANCH main first
+
+statement ok
+SET BRANCH main
+
+statement ok
+BEGIN
+
+statement error
+CALL ducklake_close_stale_branches('ducklake', older_than => NOW())
+----
+ducklake_close_stale_branches cannot be used inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+# while branches are open, merging adjacent files leaves the files they read at their fork alone
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+query I
+SELECT COUNT(*) > 1 FROM ducklake_meta.ducklake_data_file WHERE table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 't' AND end_snapshot IS NULL) AND end_snapshot IS NULL
+----
+true
+
+# closing every branch lets it merge them
+query II
+SELECT branch_name, status FROM ducklake_close_stale_branches('ducklake', older_than => NOW() + INTERVAL 1 DAY)
+----
+fresh	closed
+revived	closed
+
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file WHERE table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 't' AND end_snapshot IS NULL) AND end_snapshot IS NULL
+----
+1
+
+# a branch that cannot be read, or whose archive fails, is skipped and stays open; the others are closed (removing a
+# snapshot by hand breaks every branch forked before it)
+statement ok
+CREATE BRANCH lost
+
+statement ok
+SET BRANCH lost
+
+statement ok
+INSERT INTO t VALUES (9, 'i')
+
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO t VALUES (10, 'j')
+
+statement ok
+CREATE BRANCH broken
+
+statement ok
+CREATE BRANCH kept
+
+statement ok
+SET BRANCH broken
+
+statement ok
+INSERT INTO t VALUES (11, 'k')
+
+statement ok
+SET BRANCH kept
+
+statement ok
+INSERT INTO t VALUES (12, 'l')
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_commit SET commit_time = NOW() - INTERVAL 40 DAY WHERE branch_id IN (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name IN ('lost', 'broken', 'kept'))
+
+statement ok
+SET VARIABLE lost_fork = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'lost')
+
+statement ok
+DELETE FROM ducklake_meta.ducklake_snapshot WHERE snapshot_id = getvariable('lost_fork')
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_data_file SET path = path || '.missing' WHERE branch_id = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'broken')
+
+query IIII
+SELECT branch_name, status, len(archived_tables), CASE branch_name WHEN 'lost' THEN message = 'Cannot merge branch "lost": its fork snapshot ' || getvariable('lost_fork') || ' was expired' WHEN 'broken' THEN message LIKE '%.missing%' ELSE message IS NULL END FROM ducklake_close_stale_branches('ducklake', older_than => NOW() - INTERVAL 30 DAY)
+----
+lost	skipped	0	true
+broken	skipped	0	true
+kept	closed	1	true
+
+query I
+SELECT branch_name FROM ducklake_branches('ducklake') ORDER BY branch_id
+----
+lost
+broken
+
+# nothing of the failed archive is kept
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE database_name = 'ducklake' AND table_name LIKE 'broken%'
+----
+0
+
+statement ok
+DROP BRANCH lost
+
+statement ok
+DROP BRANCH broken
+
+# the archive tables and the closed branches survive a restart
+statement ok
+CREATE BRANCH later
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/close_stale_branches_files', METADATA_CATALOG 'ducklake_meta', READ_ONLY)
+
+statement ok
+USE ducklake
+
+query II
+SELECT schema_name, COUNT(*) FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name IN ('branch_archive', 'attic') GROUP BY ALL ORDER BY ALL
+----
+attic	1
+branch_archive	9
+
+query II
+SELECT status, COUNT(*) FROM ducklake_meta.ducklake_branching_branch GROUP BY ALL ORDER BY ALL
+----
+active	1
+closed	7
+dropped	2
+
+query I
+SELECT SUM(i) FROM query_table(getvariable('t_archive'))
+----
+9
+
+# a read-only lake can be dry run, not closed
+query II
+SELECT branch_name, status FROM ducklake_close_stale_branches('ducklake', older_than => NOW() + INTERVAL 1 DAY, dry_run => true)
+----
+later	would close
+
+statement error
+CALL ducklake_close_stale_branches('ducklake', older_than => NOW() + INTERVAL 1 DAY)
+----
+ducklake_close_stale_branches requires DuckLake "ducklake" to be attached read-write
