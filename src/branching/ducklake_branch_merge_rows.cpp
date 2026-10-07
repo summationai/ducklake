@@ -90,6 +90,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		}
 		result.fork_table_name = fork_entry->name.GetIdentifierName();
 		main_table_id = table.GetTableId();
+		DuckLakeBranchManager::ProjectColumns(table, fork_entry->Cast<DuckLakeTableEntry>(), result.branch_columns,
+		                                      result.fork_columns);
 	});
 	// how the merge treats rows main changed too since the fork
 	auto head = transaction.GetSnapshot();
@@ -123,6 +125,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	table.branch_name = table_name;
 	table.on_conflict = on_conflict;
 	table.keep_conflict_values = conflicts_only;
+	table.branch_columns = result.branch_columns;
+	table.main_columns = result.fork_columns;
 	DuckLakeBranchManager::PlanRowMerge(context, result.catalog_name, branch_name, result.fork_snapshot_id,
 	                                    head.snapshot_id, table);
 	result.conflict_rows.insert(table.conflicts.begin(), table.conflicts.end());
@@ -151,8 +155,11 @@ DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckL
 		return;
 	}
 	branch_connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
+	auto select_list = [](const vector<string> &columns) {
+		return columns.empty() ? string("*") : StringUtil::Join(columns, ", ");
+	};
 	branch_rows.Start(
-	    RunBranchSql(*branch_connection, "SELECT rowid, * FROM " +
+	    RunBranchSql(*branch_connection, "SELECT rowid, " + select_list(data.branch_columns) + " FROM " +
 	                                         BranchTableSql(data.catalog_name, data.schema_name, data.table_name) +
 	                                         " ORDER BY rowid"));
 	if (data.fork_table_name.empty()) {
@@ -160,11 +167,12 @@ DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckL
 	}
 	main_connection = make_uniq<Connection>(*context.db);
 	fork_rows.Start(RunBranchSql(
-	    *main_connection, StringUtil::Format("SELECT rowid, * FROM %s AT (VERSION => %d) ORDER BY rowid",
-	                                         BranchTableSql(data.catalog_name, data.schema_name, data.fork_table_name),
-	                                         data.fork_snapshot_id)));
+	    *main_connection,
+	    StringUtil::Format("SELECT rowid, %s FROM %s AT (VERSION => %d) ORDER BY rowid", select_list(data.fork_columns),
+	                       BranchTableSql(data.catalog_name, data.schema_name, data.fork_table_name),
+	                       data.fork_snapshot_id)));
 	if (fork_rows.result->ColumnCount() != branch_rows.result->ColumnCount()) {
-		// a branch changes no columns of main's tables
+		// both reads are projected onto the branch's columns
 		throw InternalException("A table of main has other columns on the branch than at its fork");
 	}
 }

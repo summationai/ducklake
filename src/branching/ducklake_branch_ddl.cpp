@@ -36,7 +36,16 @@ static constexpr const char *DEFINITION_TABLES_SQL = R"(
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_object(branch_id BIGINT, begin_seq BIGINT, object_id BIGINT, object_type VARCHAR, parent_id BIGINT, object_name VARCHAR, uuid VARCHAR, path VARCHAR, path_is_relative BOOLEAN, view_sql VARCHAR, view_aliases VARCHAR, comment VARCHAR, next_column_id BIGINT);
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_column(branch_id BIGINT, begin_seq BIGINT, object_id BIGINT, column_id BIGINT, parent_column BIGINT, column_order BIGINT, column_name VARCHAR, column_type VARCHAR, initial_default VARCHAR, default_value VARCHAR, default_value_type VARCHAR, nulls_allowed BOOLEAN, comment VARCHAR);
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_main_change(branch_id BIGINT, begin_seq BIGINT, object_type VARCHAR, main_id BIGINT, change_type VARCHAR, new_name VARCHAR);
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_column_change(branch_id BIGINT, begin_seq BIGINT, change_seq BIGINT, change_type VARCHAR, table_id BIGINT, column_id BIGINT, parent_column BIGINT, column_order BIGINT, column_name VARCHAR, column_type VARCHAR, initial_default VARCHAR, default_value VARCHAR, default_value_type VARCHAR, nulls_allowed BOOLEAN, comment VARCHAR);
 )";
+
+//! The columns a branch added to main's tables and dropped from any table, in the order it changed them. Lakes whose
+//! definition tables predate it get it with the first such change.
+static constexpr const char *COLUMN_CHANGE_TABLE_SQL =
+    "CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_branching_column_change(branch_id BIGINT, begin_seq "
+    "BIGINT, change_seq BIGINT, change_type VARCHAR, table_id BIGINT, column_id BIGINT, parent_column BIGINT, "
+    "column_order BIGINT, column_name VARCHAR, column_type VARCHAR, initial_default VARCHAR, default_value VARCHAR, "
+    "default_value_type VARCHAR, nulls_allowed BOOLEAN, comment VARCHAR);\n";
 
 static constexpr const char *SCHEMA_OBJECT = "schema";
 static constexpr const char *TABLE_OBJECT = "table";
@@ -58,6 +67,20 @@ bool DuckLakeBranchManager::HasDefinitionTables(DuckLakeTransaction &transaction
 		probe->GetErrorObject().Throw("Failed to probe DuckLake branch tables: ");
 	}
 	SetHasDefinitionTables(transaction, true);
+	return true;
+}
+
+bool DuckLakeBranchManager::HasColumnChangeTable(DuckLakeTransaction &transaction) {
+	if (!HasDefinitionTables(transaction)) {
+		return false;
+	}
+	auto probe = transaction.Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_column_change LIMIT 1");
+	if (probe->HasError()) {
+		if (probe->GetErrorObject().Type() == ExceptionType::CATALOG) {
+			return false;
+		}
+		probe->GetErrorObject().Throw("Failed to probe DuckLake branch tables: ");
+	}
 	return true;
 }
 
@@ -145,6 +168,11 @@ DuckLakeBranchObjectRows EncodeTable(DuckLakeTransaction &transaction, DuckLakeL
 		AppendColumnRows(object_id, columns[column_idx], optional_idx(), column_idx, comments[column_idx],
 		                 rows.column_rows, max_column_id);
 	}
+	// the table's own counter, which a dropped column does not lower
+	auto next_column_id = DuckLakeBranchManager::NextColumnId(table);
+	if (next_column_id.IsValid()) {
+		max_column_id = MaxValue(max_column_id, next_column_id.GetIndex() - 1);
+	}
 	rows.object_row = StringUtil::Format(
 	    "%d, 'table', %d, %s, %s, %s, %s, NULL, NULL, %s, %d", object_id, StoredSchemaId(loaded, schema, allocate),
 	    Literal(table.name.GetIdentifierName()), Literal(table.GetTableUUID()), Literal(path.path),
@@ -218,6 +246,76 @@ map<idx_t, DuckLakeBranchObjectRows> EncodeObjects(DuckLakeTransaction &transact
 	return result;
 }
 
+//! The versions of one of the transaction's tables, oldest first
+vector<reference<DuckLakeTableEntry>> TableVersions(CatalogEntry &newest) {
+	vector<reference<DuckLakeTableEntry>> versions;
+	for (reference<CatalogEntry> version = newest;; version = version.get().Child()) {
+		versions.push_back(version.get().Cast<DuckLakeTableEntry>());
+		if (!version.get().HasChild()) {
+			break;
+		}
+	}
+	std::reverse(versions.begin(), versions.end());
+	return versions;
+}
+
+//! The column changes of the transaction's tables, as ducklake_branching_column_change rows (without the branch and
+//! sequence): every column added to a main table, and every column dropped from any table, in the order made. A branch
+//! table's added columns are part of its definition instead.
+set<string> EncodeColumnChanges(DuckLakeTransaction &transaction, DuckLakeLoadedBranch &loaded,
+                                DuckLakeSnapshot fork_snapshot, optional_ptr<const ObjectIdAllocator> allocate) {
+	auto &state = DuckLakeBranchManager::GetTransactionState(transaction);
+	set<string> result;
+	for (auto &schema_entry : state.new_tables) {
+		for (auto &entry : schema_entry.second->GetEntries()) {
+			if (entry.second->type != CatalogType::TABLE_ENTRY) {
+				continue;
+			}
+			auto versions = TableVersions(*entry.second);
+			auto table_id = versions.back().get().GetTableId();
+			auto is_main = !IsTransactionLocal(table_id);
+			idx_t change_seq = 0;
+			for (idx_t version_idx = 0; version_idx < versions.size(); version_idx++) {
+				auto &version = versions[version_idx].get();
+				auto change = version.GetLocalChange();
+				const char *change_type;
+				DuckLakeColumnInfo column;
+				idx_t order = 0;
+				if (change.type == LocalChangeType::ADD_COLUMN && is_main) {
+					change_type = "added";
+					column = version.GetAddColumnInfo();
+					order = version.GetColumns().LogicalColumnCount() - 1;
+				} else if (change.type == LocalChangeType::REMOVE_COLUMN) {
+					change_type = "dropped";
+					// the dropped column as the version before the drop had it
+					optional_ptr<CatalogEntry> previous;
+					if (version_idx > 0) {
+						previous = versions[version_idx - 1].get();
+					} else {
+						previous = DuckLakeBranchManager::GetMainEntry(transaction, fork_snapshot, table_id,
+						                                               CatalogType::TABLE_ENTRY);
+					}
+					if (!previous) {
+						throw InternalException("A dropped column of a table missing at the fork");
+					}
+					column = previous->Cast<DuckLakeTableEntry>().GetColumnInfo(change.field_index);
+				} else {
+					continue;
+				}
+				auto stored_id = is_main ? table_id.index : ObjectId(loaded, table_id.index, allocate);
+				vector<string> rows;
+				idx_t max_column_id = 0;
+				AppendColumnRows(stored_id, column, optional_idx(), order, Value(), rows, max_column_id);
+				for (auto &row : rows) {
+					result.insert(StringUtil::Format("%d, '%s', %s", change_seq, change_type, row));
+				}
+				change_seq++;
+			}
+		}
+	}
+	return result;
+}
+
 //! What the transaction does to main's objects: ducklake_branching_main_change rows -> their changes_made entry
 map<string, string> EncodeMainChanges(DuckLakeTransaction &transaction, DuckLakeSnapshot fork_snapshot) {
 	auto &state = DuckLakeBranchManager::GetTransactionState(transaction);
@@ -236,6 +334,12 @@ map<string, string> EncodeMainChanges(DuckLakeTransaction &transaction, DuckLake
 	for (auto &schema : state.dropped_schemas) {
 		add(SCHEMA_OBJECT, schema.first.index, "dropped", string());
 	}
+	for (auto &table_id : DuckLakeBranchManager::ColumnChangedMainTables(transaction)) {
+		// the columns themselves are in ducklake_branching_column_change; this row makes a binary that does not read
+		// that table refuse the branch rather than ignore them
+		result.emplace(StringUtil::Format("'%s', %d, 'columns', NULL", TABLE_OBJECT, table_id.index),
+		               StringUtil::Format("altered_table:%d", table_id.index));
+	}
 	if (state.renamed_tables.empty() && state.renamed_views.empty()) {
 		return result;
 	}
@@ -249,7 +353,7 @@ map<string, string> EncodeMainChanges(DuckLakeTransaction &transaction, DuckLake
 			if (IsTransactionLocal(id)) {
 				continue;
 			}
-			// the only change a branch makes to a main table or view is a rename
+			// a main table or view whose name differs from the fork was renamed; other changes are column changes
 			auto &new_name = catalog_entry.name.GetIdentifierName();
 			auto fork_entry = MainEntryById(fork_set, id, catalog_entry.type);
 			if (fork_entry && fork_entry->name.GetIdentifierName() == new_name) {
@@ -293,6 +397,12 @@ struct StoredMainChange {
 	idx_t main_id;
 	string change_type;
 	string new_name;
+};
+
+//! One column change of a table: the column added or dropped, with its nested fields
+struct StoredColumnChange {
+	bool added;
+	vector<StoredColumn> fields;
 };
 
 //! The field id of a stored column with its children; mirrors how DuckLake's catalog loader reads ducklake_column
@@ -399,7 +509,9 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		change.new_name = row.IsNull(3) ? string() : row.GetValue<string>(3);
 		auto valid_type = change.object_type == TABLE_OBJECT || change.object_type == VIEW_OBJECT ||
 		                  (change.object_type == SCHEMA_OBJECT && change.change_type == "dropped");
-		if (!valid_type || (change.change_type != "dropped" && change.change_type != "renamed")) {
+		auto valid_change = change.change_type == "dropped" || change.change_type == "renamed" ||
+		                    (change.change_type == "columns" && change.object_type == TABLE_OBJECT);
+		if (!valid_type || !valid_change) {
 			throw InvalidInputException("Branch \"%s\" has an unknown catalog change \"%s\" of a %s", branch.name,
 			                            change.change_type, change.object_type);
 		}
@@ -466,7 +578,53 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		column.comment = row.IsNull(10) ? Value() : Value(row.GetValue<string>(10));
 		objects[position->second].columns.push_back(std::move(column));
 	}
-	if (main_changes.empty() && objects.empty()) {
+	// column changes, per table (stored id) in the order the branch made them
+	map<idx_t, map<idx_t, StoredColumnChange>> column_changes;
+	auto change_result = transaction.Query(
+	    "SELECT table_id, change_seq, change_type, column_id, parent_column, column_order, column_name, column_type, "
+	    "initial_default, default_value, default_value_type, nulls_allowed FROM "
+	    "{METADATA_CATALOG}.ducklake_branching_column_change WHERE " +
+	    filter);
+	if (change_result->HasError()) {
+		if (change_result->GetErrorObject().Type() != ExceptionType::CATALOG) {
+			change_result->GetErrorObject().Throw("Failed to read DuckLake branch column changes: ");
+		}
+		// definition tables that predate column changes
+	} else {
+		loaded.has_column_change_table = true;
+		for (auto &row : *change_result) {
+			auto change_type = row.GetValue<string>(2);
+			if (change_type != "added" && change_type != "dropped") {
+				throw InvalidInputException("Branch \"%s\" has an unknown column change \"%s\"", branch.name,
+				                            change_type);
+			}
+			auto &change = column_changes[row.GetValue<idx_t>(0)][row.GetValue<idx_t>(1)];
+			change.added = change_type == "added";
+			StoredColumn column;
+			column.column_id = row.GetValue<idx_t>(3);
+			if (!row.IsNull(4)) {
+				column.parent = row.GetValue<idx_t>(4);
+			}
+			column.order = row.GetValue<idx_t>(5);
+			column.info.id = FieldIndex(column.column_id);
+			column.info.name = row.GetValue<string>(6);
+			column.info.type = row.GetValue<string>(7);
+			column.info.initial_default = row.IsNull(8) ? Value() : Value(row.GetValue<string>(8));
+			column.info.default_value = row.IsNull(9) ? Value() : Value(row.GetValue<string>(9));
+			column.info.default_value_type = row.IsNull(10) ? string() : row.GetValue<string>(10);
+			column.info.nulls_allowed = row.IsNull(11) || row.GetValue<bool>(11);
+			change.fields.push_back(std::move(column));
+		}
+	}
+	// the root column of one change, with its nested fields attached
+	auto change_column = [&](StoredColumnChange &change) {
+		auto roots = BuildColumnTree(std::move(change.fields), branch.name);
+		if (roots.size() != 1) {
+			throw InvalidInputException("Branch \"%s\" has a column change of %d columns", branch.name, roots.size());
+		}
+		return std::move(roots[0]);
+	};
+	if (main_changes.empty() && objects.empty() && column_changes.empty()) {
 		return;
 	}
 
@@ -574,6 +732,40 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		}
 	}
 
+	// the columns the branch added to and dropped from main's tables, through DuckLake's own ALTER; an added column
+	// keeps the ids the branch's files were written with
+	for (auto &table_changes : column_changes) {
+		if (table_changes.first >= BRANCH_FILE_ID_BASE) {
+			continue;
+		}
+		TableIndex table_id(table_changes.first);
+		auto local_version = LocalTableVersion(transaction, table_id);
+		reference<DuckLakeTableEntry> latest =
+		    local_version ? *local_version : main_entry(TABLE_OBJECT, table_id.index).Cast<DuckLakeTableEntry>();
+		for (auto &change_entry : table_changes.second) {
+			auto column = change_column(change_entry.second);
+			auto &table = latest.get();
+			unique_ptr<CatalogEntry> new_entry;
+			if (change_entry.second.added) {
+				new_entry = AddColumnWithIds(context, transaction, table, column.info);
+			} else {
+				auto field = table.GetFieldData().GetByFieldIndex(FieldIndex(column.column_id));
+				if (!field) {
+					throw InvalidInputException(
+					    "Branch \"%s\" dropped column %d of table \"%s\", which it does not have", branch.name,
+					    column.column_id, table.name.GetIdentifierName());
+				}
+				AlterEntryData alter_data(table.ParentSchema().GetQualifiedName(table.name),
+				                          OnEntryNotFound::THROW_EXCEPTION);
+				RemoveColumnInfo info(alter_data, field->Name(), false, false);
+				new_entry = table.Alter(context, transaction, info);
+			}
+			auto &next = new_entry->Cast<DuckLakeTableEntry>();
+			transaction.AlterEntry(table, std::move(new_entry));
+			latest = next;
+		}
+	}
+
 	// the tables and views the branch created - tables first, since views read them
 	Identifier catalog_name(catalog.GetName());
 	for (auto object_type : {TABLE_OBJECT, VIEW_OBJECT}) {
@@ -609,6 +801,33 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 				                            object.name);
 			}
 			auto columns = BuildColumnTree(std::move(object.columns), branch.name);
+			// the columns the branch dropped are created too and dropped again below, so that a merge keeps their ids
+			// taken on main, as DuckLake does for a table created and changed in one transaction
+			vector<string> dropped_names;
+			auto dropped = column_changes.find(object.object_id);
+			if (dropped != column_changes.end()) {
+				for (auto &change_entry : dropped->second) {
+					if (change_entry.second.added) {
+						throw InvalidInputException("Branch \"%s\" has an added column of table \"%s\" it created",
+						                            branch.name, object.name);
+					}
+					auto column = change_column(change_entry.second);
+					// a later column may have taken its name
+					auto taken = [&](const string &name) {
+						for (auto &existing : columns) {
+							if (StringUtil::CIEquals(existing.info.name, name)) {
+								return true;
+							}
+						}
+						return false;
+					};
+					if (taken(column.info.name)) {
+						column.info.name += "__dropped_" + to_string(column.column_id);
+					}
+					dropped_names.push_back(column.info.name);
+					columns.push_back(std::move(column));
+				}
+			}
 			auto table_info = make_uniq<CreateTableInfo>(*schema, object_name);
 			auto field_data = make_shared_ptr<DuckLakeFieldData>();
 			for (auto &column : columns) {
@@ -640,6 +859,12 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 				transaction.AlterEntry(latest.get(), std::move(new_entry));
 				latest = next;
 			};
+			for (auto &dropped_name : dropped_names) {
+				AlterEntryData alter_data(schema->GetQualifiedName(Identifier(object.name)),
+				                          OnEntryNotFound::THROW_EXCEPTION);
+				RemoveColumnInfo info(alter_data, dropped_name, false, false);
+				apply(latest.get().Alter(context, transaction, info));
+			}
 			if (!object.comment.IsNull()) {
 				SetCommentInfo info(CatalogType::TABLE_ENTRY, catalog_name, schema_name, object_name, object.comment,
 				                    OnEntryNotFound::THROW_EXCEPTION);
@@ -661,6 +886,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 	for (auto &change : EncodeMainChanges(transaction, fork_snapshot)) {
 		loaded.main_changes.insert(change.first);
 	}
+	loaded.column_changes = EncodeColumnChanges(transaction, loaded, fork_snapshot, nullptr);
 }
 
 optional_ptr<CatalogEntry> DuckLakeBranchManager::GetTableEntry(DuckLakeTransaction &transaction,
@@ -678,6 +904,92 @@ optional_ptr<CatalogEntry> DuckLakeBranchManager::GetTableEntry(DuckLakeTransact
 		}
 	}
 	return nullptr;
+}
+
+optional_ptr<DuckLakeTableEntry> DuckLakeBranchManager::LocalTableVersion(DuckLakeTransaction &transaction,
+                                                                          TableIndex table_id) {
+	for (auto &schema_entry : transaction.state->new_tables) {
+		for (auto &entry : schema_entry.second->GetEntries()) {
+			if (entry.second->type == CatalogType::TABLE_ENTRY &&
+			    entry.second->Cast<DuckLakeTableEntry>().GetTableId() == table_id) {
+				return entry.second->Cast<DuckLakeTableEntry>();
+			}
+		}
+	}
+	return nullptr;
+}
+
+optional_ptr<CatalogEntry> DuckLakeBranchManager::CurrentTableEntry(DuckLakeTransaction &transaction,
+                                                                    DuckLakeSnapshot snapshot, TableIndex table_id) {
+	auto local_version = LocalTableVersion(transaction, table_id);
+	if (local_version) {
+		return local_version.get();
+	}
+	return GetTableEntry(transaction, snapshot, table_id);
+}
+
+optional_idx DuckLakeBranchManager::NextColumnId(const DuckLakeTableEntry &table) {
+	return table.next_column_id;
+}
+
+namespace {
+
+bool SameColumnIds(const DuckLakeColumnInfo &a, const DuckLakeColumnInfo &b) {
+	if (a.id.index != b.id.index || a.children.size() != b.children.size()) {
+		return false;
+	}
+	for (idx_t child_idx = 0; child_idx < a.children.size(); child_idx++) {
+		if (!SameColumnIds(a.children[child_idx], b.children[child_idx])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace
+
+unique_ptr<CatalogEntry> DuckLakeBranchManager::AddColumnWithIds(ClientContext &context,
+                                                                 DuckLakeTransaction &transaction,
+                                                                 DuckLakeTableEntry &table,
+                                                                 const DuckLakeColumnInfo &column) {
+	auto field_id = ColumnFieldId(column);
+	ColumnDefinition definition(Identifier(column.name), field_id->Type());
+	auto default_value = field_id->GetDefault();
+	if (default_value) {
+		definition.SetDefaultValue(std::move(default_value));
+	}
+	// DuckLake gives a new column the table's next column id, and its nested fields the ids after it. A copy of the
+	// table hands out the stored id, since the table itself may be main's shared catalog entry.
+	auto create_info = table.GetInfo();
+	auto copy = make_uniq<DuckLakeTableEntry>(table, create_info->Cast<CreateTableInfo>(), LocalChangeType::NONE);
+	copy->next_column_id = column.id.index;
+	AlterEntryData alter_data(table.ParentSchema().GetQualifiedName(table.name), OnEntryNotFound::THROW_EXCEPTION);
+	AddColumnInfo info(alter_data, std::move(definition), false, AddColumnConstraints());
+	auto result = copy->Alter(context, transaction, info);
+	if (!SameColumnIds(result->Cast<DuckLakeTableEntry>().GetAddColumnInfo(), column)) {
+		throw InvalidInputException("Column \"%s\" a branch added to table \"%s\" has inconsistent column ids",
+		                            column.name, table.name.GetIdentifierName());
+	}
+	return result;
+}
+
+set<TableIndex> DuckLakeBranchManager::ColumnChangedMainTables(DuckLakeTransaction &transaction) {
+	set<TableIndex> result;
+	for (auto &schema_entry : transaction.state->new_tables) {
+		for (auto &entry : schema_entry.second->GetEntries()) {
+			if (entry.second->type != CatalogType::TABLE_ENTRY) {
+				continue;
+			}
+			for (auto &version : TableVersions(*entry.second)) {
+				auto change = version.get().GetLocalChange().type;
+				if (!IsTransactionLocal(version.get().GetTableId()) &&
+				    (change == LocalChangeType::ADD_COLUMN || change == LocalChangeType::REMOVE_COLUMN)) {
+					result.insert(version.get().GetTableId());
+				}
+			}
+		}
+	}
+	return result;
 }
 
 TableIndex DuckLakeBranchManager::LocalTableId(const DuckLakeLoadedBranch &loaded, idx_t stored_id,
@@ -777,6 +1089,22 @@ DuckLakeBranchDefinitionChanges DuckLakeBranchManager::WriteDefinitions(DuckLake
 		}
 		if (!rows.empty()) {
 			batch += "INSERT INTO {METADATA_CATALOG}.ducklake_branching_main_change VALUES " + rows + ";\n";
+		}
+	}
+
+	auto column_changes = EncodeColumnChanges(transaction, loaded, transaction.GetSnapshot(), &next_object_id);
+	if (column_changes != loaded.column_changes) {
+		if (!loaded.has_column_change_table) {
+			batch += COLUMN_CHANGE_TABLE_SQL;
+		}
+		batch += StringUtil::Format(
+		    "DELETE FROM {METADATA_CATALOG}.ducklake_branching_column_change WHERE branch_id = %d;\n", branch_id);
+		string rows;
+		for (auto &change : column_changes) {
+			AppendValues(rows, StringUtil::Format("(%d, %d, %s)", branch_id, new_seq, change));
+		}
+		if (!rows.empty()) {
+			batch += "INSERT INTO {METADATA_CATALOG}.ducklake_branching_column_change VALUES " + rows + ";\n";
 		}
 	}
 
@@ -901,11 +1229,16 @@ void DuckLakeBranchManager::CheckAlter(DuckLakeTransaction &transaction, Catalog
 		return;
 	}
 	if (!IsTransactionLocal(id)) {
-		EnsureNotOnBranch(transaction, is_table ? "Changing a main table other than renaming it"
-		                                        : "Changing a main view other than renaming it");
+		if (is_table && (change == LocalChangeType::ADD_COLUMN || change == LocalChangeType::REMOVE_COLUMN)) {
+			return;
+		}
+		EnsureNotOnBranch(transaction,
+		                  is_table ? "Changing a main table other than renaming it or adding and dropping columns"
+		                           : "Changing a main view other than renaming it");
 	}
 	switch (change) {
 	case LocalChangeType::ADD_COLUMN:
+	case LocalChangeType::REMOVE_COLUMN:
 	case LocalChangeType::RENAME_COLUMN:
 	case LocalChangeType::SET_DEFAULT:
 	case LocalChangeType::SET_NULL:
@@ -916,9 +1249,6 @@ void DuckLakeBranchManager::CheckAlter(DuckLakeTransaction &transaction, Catalog
 		if (!is_table) {
 			EnsureNotOnBranch(transaction, "COMMENT ON COLUMN of a view");
 		}
-		return;
-	case LocalChangeType::REMOVE_COLUMN:
-		EnsureNotOnBranch(transaction, "DROP COLUMN");
 		return;
 	case LocalChangeType::CHANGE_COLUMN_TYPE:
 		EnsureNotOnBranch(transaction, "Changing a column type or its struct fields");
@@ -950,9 +1280,41 @@ optional_ptr<CatalogEntry> DuckLakeBranchManager::GetMainEntry(DuckLakeTransacti
 	return MainEntryById(transaction.GetCatalog().GetSchemaForSnapshot(transaction, snapshot), id, type);
 }
 
+void DuckLakeBranchManager::CheckColumnChanges(DuckLakeTransaction &transaction, const string &branch_name,
+                                               DuckLakeSnapshot fork_snapshot,
+                                               const set<TableIndex> &column_changed_tables,
+                                               const SnapshotChangeInformation &other_changes) {
+	if (column_changed_tables.empty()) {
+		return;
+	}
+	// the branch's new columns took ids after main's at the fork; any change main made to the table since, or two
+	// branches adding columns to it, would mix them up - such a merge is reported, not attempted
+	auto renamed = RenamedOnMain(transaction, false, column_changed_tables, fork_snapshot.snapshot_id);
+	auto &fork_set = transaction.GetCatalog().GetSchemaForSnapshot(transaction, fork_snapshot);
+	for (auto &id : column_changed_tables) {
+		const char *main_action = nullptr;
+		if (other_changes.dropped_tables.find(id) != other_changes.dropped_tables.end()) {
+			main_action = "dropped";
+		} else if (other_changes.altered_tables.find(id) != other_changes.altered_tables.end()) {
+			main_action = "altered";
+		} else if (renamed.find(id) != renamed.end()) {
+			main_action = "renamed";
+		}
+		if (main_action) {
+			auto entry = MainEntryById(fork_set, id, CatalogType::TABLE_ENTRY);
+			throw TransactionException("Transaction conflict - branch \"%s\" changed the columns of table \"%s\", but "
+			                           "main %s it since the fork",
+			                           branch_name, entry ? entry->name.GetIdentifierName() : to_string(id.index),
+			                           main_action);
+		}
+	}
+}
+
 void DuckLakeBranchManager::CheckMergeDefinitions(DuckLakeTransaction &transaction, const string &branch_name,
                                                   DuckLakeSnapshot fork_snapshot,
+                                                  const set<TableIndex> &column_changed_tables,
                                                   const SnapshotChangeInformation &other_changes) {
+	CheckColumnChanges(transaction, branch_name, fork_snapshot, column_changed_tables, other_changes);
 	auto &state = *transaction.state;
 	set<TableIndex> tables = state.dropped_tables;
 	tables.insert(state.renamed_tables.begin(), state.renamed_tables.end());
