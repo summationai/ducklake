@@ -501,6 +501,100 @@ TableFunction DuckLakeBranchFunctions::GetMergeBranchFunction() {
 }
 
 //===--------------------------------------------------------------------===//
+// ducklake_close_stale_branches
+//===--------------------------------------------------------------------===//
+struct DuckLakeCloseStaleData : public TableFunctionData {
+	explicit DuckLakeCloseStaleData(DuckLakeCatalog &catalog) : catalog(catalog) {
+	}
+
+	DuckLakeCatalog &catalog;
+	timestamp_tz_t older_than;
+	string archive_schema = "branch_archive";
+	bool dry_run = false;
+};
+
+struct DuckLakeCloseStaleState : public GlobalTableFunctionState {
+	bool started = false;
+	vector<DuckLakeStaleBranch> branches;
+	idx_t offset = 0;
+};
+
+static unique_ptr<FunctionData> CloseStaleBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<DuckLakeCloseStaleData>(GetBranchCatalog(context, input.inputs[0]));
+	auto older_than = input.named_parameters.find("older_than");
+	if (older_than == input.named_parameters.end() || older_than->second.IsNull()) {
+		throw InvalidInputException("ducklake_close_stale_branches requires older_than: the branches without commits "
+		                            "since then are closed");
+	}
+	result->older_than = older_than->second.GetValue<timestamp_tz_t>();
+	auto dry_run = input.named_parameters.find("dry_run");
+	if (dry_run != input.named_parameters.end() && !dry_run->second.IsNull()) {
+		result->dry_run = dry_run->second.GetValue<bool>();
+	}
+	auto archive_schema = input.named_parameters.find("archive_schema");
+	if (archive_schema != input.named_parameters.end()) {
+		if (archive_schema->second.IsNull() || archive_schema->second.GetValue<string>().empty()) {
+			throw InvalidInputException("archive_schema cannot be NULL or empty");
+		}
+		result->archive_schema = archive_schema->second.GetValue<string>();
+	}
+	names.emplace_back("branch_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("last_activity");
+	return_types.emplace_back(LogicalType::TIMESTAMP_TZ);
+	names.emplace_back("status");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("archived_tables");
+	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+	names.emplace_back("message");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	return std::move(result);
+}
+
+static unique_ptr<GlobalTableFunctionState> CloseStaleInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<DuckLakeCloseStaleState>();
+}
+
+static void CloseStaleExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = data_p.global_state->Cast<DuckLakeCloseStaleState>();
+	auto &data = data_p.bind_data->Cast<DuckLakeCloseStaleData>();
+	if (!state.started) {
+		state.started = true;
+		DuckLakeBranchManager::EnsureAutoCommit(context, "ducklake_close_stale_branches");
+		if (!data.dry_run) {
+			EnsureWritable(data.catalog, "ducklake_close_stale_branches");
+		}
+		DuckLakeBranchState::Selection selection;
+		if (GetBranchState(context).TryGetSelection(data.catalog.GetOid(), selection)) {
+			throw InvalidInputException("Cannot close branches while on a branch - run SET BRANCH main first");
+		}
+		state.branches = DuckLakeBranchManager::CloseStaleBranches(context, data.catalog, data.older_than,
+		                                                           data.archive_schema, data.dry_run);
+	}
+	idx_t count = 0;
+	while (state.offset < state.branches.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &branch = state.branches[state.offset++];
+		output.data[0].SetValue(count, Value(branch.info.name));
+		output.data[1].SetValue(count, branch.info.last_activity);
+		output.data[2].SetValue(count, Value(branch.status));
+		output.data[3].SetValue(count, ChangeList(branch.archived_tables));
+		output.data[4].SetValue(count, branch.message.empty() ? Value(LogicalType::VARCHAR) : Value(branch.message));
+		count++;
+	}
+	output.SetChildCardinality(count);
+}
+
+TableFunction DuckLakeBranchFunctions::GetCloseStaleBranchesFunction() {
+	TableFunction function("ducklake_close_stale_branches", {LogicalType::VARCHAR}, CloseStaleExecute, CloseStaleBind,
+	                       CloseStaleInit);
+	function.named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
+	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
+	function.named_parameters["archive_schema"] = LogicalType::VARCHAR;
+	return function;
+}
+
+//===--------------------------------------------------------------------===//
 // ducklake_current_branch / ducklake_branches
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> CurrentBranchBind(ClientContext &context, TableFunctionBindInput &input,
@@ -531,16 +625,19 @@ static unique_ptr<FunctionData> BranchesBind(ClientContext &context, TableFuncti
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("created_at");
 	return_types.emplace_back(LogicalType::TIMESTAMP_TZ);
+	names.emplace_back("last_activity");
+	return_types.emplace_back(LogicalType::TIMESTAMP_TZ);
 
 	auto result = make_uniq<MetadataBindData>();
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
-	for (auto &branch : DuckLakeBranchManager::GetBranches(transaction)) {
+	for (auto &branch : DuckLakeBranchManager::GetBranchesWithActivity(transaction)) {
 		vector<Value> row;
 		row.push_back(Value::UBIGINT(branch.branch_id));
 		row.push_back(Value(branch.name));
 		row.push_back(Value::UBIGINT(branch.fork_snapshot_id));
 		row.push_back(Value::UBIGINT(branch.head_seq));
 		row.push_back(branch.created_at.DefaultCastAs(LogicalType::TIMESTAMP_TZ));
+		row.push_back(branch.last_activity);
 		result->rows.push_back(std::move(row));
 	}
 	return std::move(result);

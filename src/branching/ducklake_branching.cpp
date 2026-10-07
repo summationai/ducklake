@@ -20,6 +20,7 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetSetBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetMergeBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetBranchTableFunction());
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetCloseStaleBranchesFunction());
 	DuckLakeCurrentBranchFunction current_branch;
 	loader.RegisterFunction(current_branch);
 	DuckLakeBranchesFunction branches;
@@ -70,11 +71,24 @@ bool DuckLakeBranching::TryCommit(DuckLakeTransaction &transaction) {
 		DuckLakeBranchManager::CommitMerge(transaction);
 		return true;
 	}
+	if (DuckLakeBranchManager::IsClosingBranch(transaction)) {
+		DuckLakeBranchManager::CommitClose(transaction);
+		return true;
+	}
 	return false;
 }
 
 void DuckLakeBranching::PrepareCommitLoop(DuckLakeTransaction &transaction, DuckLakeCommitContext &context) {
 	auto state = DuckLakeBranchManager::GetState(transaction);
+	if (state && state->close) {
+		// a branch is closed in the commit that archives it, while it is still as it was found
+		auto &close = *state->close;
+		context.pre_commit_check = [&transaction, &close](const SnapshotChangeInformation &) {
+			DuckLakeBranchManager::CheckClose(transaction, close);
+		};
+		context.extra_commit_sql = DuckLakeBranchManager::CloseBookkeepingSql(transaction, close, true);
+		return;
+	}
 	if (!state || !state->merge) {
 		return;
 	}

@@ -20,8 +20,8 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | `src/storage/ducklake_transaction_manager.cpp` | `StartTransaction`, after `Start()` | `OnTransactionStart(*transaction, context)` | puts the transaction on the connection's selected branch |
 | | same, the immediate-mode condition | `&& !IsOnBranch(*transaction)` | a branch is loaded on first use, not at transaction start |
 | `src/storage/ducklake_transaction.cpp` | `GetSnapshot()`, at entry | `TryGetSnapshot(*this, branch_snapshot)` | a branch reads main at its fork, with the branch's changes loaded |
-| | `Commit()`, first statement in the `try` | `TryCommit(*this)` | commits to the branch, or merges a branch into main |
-| | `RunCommitLoop`, before `state->Commit` | `PrepareCommitLoop(*this, context)` | a merge checks its branch on every attempt and records itself in the snapshot's batch |
+| | `Commit()`, first statement in the `try` | `TryCommit(*this)` | commits to the branch, merges a branch into main, or closes a stale branch |
+| | `RunCommitLoop`, before `state->Commit` | `PrepareCommitLoop(*this, context)` | a merge, or the close of a stale branch, checks its branch on every attempt and records itself in the snapshot's batch |
 | | `DeleteSnapshots` | `DeleteSnapshots(*this, snapshots)` (replaces `metadata_manager.DeleteSnapshots`) | keeps the snapshots an open branch needs |
 | | `CreateEntry`, `DropEntry`, `AlterEntry`, at entry | `CheckCreate(*this, *entry)`, `CheckDrop(*this, entry)`, `CheckAlter(*this, entry, new_entry.get())` | refuse the catalog changes a branch does not support yet |
 | | `GetTransactionLocalSchemas`, `GetTransactionLocalSchema`, `GetCatalogVersion`, at entry | `EnsureLoaded(*this)` | a branch's catalog changes are loaded before the transaction's own schemas or its catalog version are read |
@@ -57,7 +57,7 @@ Every `.cpp` file above that calls `DuckLakeBranching` also includes `branching/
 | `include/storage/ducklake_delete.hpp` | `friend class DuckLakeBranchManager;` | the branch delete writer uses `TryDropFullyDeletedFile` |
 | `include/storage/ducklake_table_entry.hpp` | `friend class DuckLakeBranchManager;` | a column a branch adds keeps the id its files were written with: the replay sets the table's `next_column_id`, and a branch table stores the real counter |
 | `include/common/ducklake_data_file.hpp` | `DuckLakeDeleteFile::created_by_ducklake` | marks delete files of earlier branch commits, as `DuckLakeDataFile::created_by_ducklake` already marks data files |
-| `include/storage/ducklake_transaction_state.hpp` | `DuckLakeCommitContext::pre_commit_check`, `extra_commit_sql`; the defaulted `pre_commit_check` parameter of `CheckForConflicts` | generic commit-loop extension points the merge uses |
+| `include/storage/ducklake_transaction_state.hpp` | `DuckLakeCommitContext::pre_commit_check`, `extra_commit_sql`; the defaulted `pre_commit_check` parameter of `CheckForConflicts` | generic commit-loop extension points the merge and the close of a stale branch use |
 
 ## Private members branching code depends on
 
@@ -122,6 +122,20 @@ rebase, check:
   tables it merges row by row out of those sets (`ExcludeFromInsertDeleteRules`).
 - Expiry, compaction and flushing never touch what an open branch reads at its fork, so main's compaction or flush
   cannot meet a branch's deletes on those rows; `ducklake_rewrite_data_files` can, and keeps the table-level rule.
+
+## Upstream behaviour closing stale branches relies on
+
+`src/branching/ducklake_branch_close.cpp` archives a stale branch with `CREATE TABLE ... AS SELECT` from
+`ducklake_branch_table` on an internal connection, and closes the branch in the commit that creates the archive tables.
+It adds no call site. After a rebase, check:
+
+- A main transaction with catalog changes commits through `RunCommitLoop`, which `CommitClose` calls directly, as
+  `CommitMerge` does, so the close never takes `FlushChangesServerSide`.
+- `DuckLakeTransaction::GetConnection` creates the metadata connection on first use. Before closing, the caller's
+  connection is dropped when the caller made no changes: a SQLite metadata catalog takes no write while another
+  transaction reads it.
+- `ducklake_files_scheduled_for_deletion` accepts branch file ids, and `ducklake_cleanup_old_files` removes those files,
+  as for `DROP BRANCH`.
 
 ## After a rebase
 
