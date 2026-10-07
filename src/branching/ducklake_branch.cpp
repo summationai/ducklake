@@ -1739,7 +1739,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::LoadAndPreviewMerge(Duc
 		}
 		check(entry, object_changes);
 		if (row_merged != row_merge.end() && entry.conflict.empty() && !row_merged->second.conflicts.empty()) {
-			entry.conflict = RowConflictMessage(name, row_merged->second);
+			entry.conflict =
+			    RowConflictMessage(transaction.GetCatalog().GetName().GetIdentifierName(), name, row_merged->second);
 		}
 		if (table_local_changes != all_local_changes.end()) {
 			lock_guard<mutex> guard(local_changes.lock);

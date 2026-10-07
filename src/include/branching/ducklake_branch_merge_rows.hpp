@@ -67,7 +67,7 @@ struct DuckLakeMergeRowsBindData {
 	//! What the merge does with rows both sides changed differently, and the rows that resolves
 	DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL;
 	set<int64_t> resolved_rows;
-	//! conflicts_only: one output row per row both sides changed differently, with its three versions
+	//! conflicts_only: one output row per row both sides changed differently, with what each side did
 	bool conflicts_only = false;
 	vector<pair<int64_t, DuckLakeRowConflict>> conflict_details;
 	vector<string> column_names;
@@ -76,9 +76,6 @@ struct DuckLakeMergeRowsBindData {
 	//! column as its initial default); empty when the columns are the same
 	vector<string> branch_columns;
 	vector<string> fork_columns;
-
-	//! The table's row as one STRUCT
-	LogicalType RowType() const;
 };
 
 //! The rows a merge would insert, delete and update in one table, in the terms of ducklake_table_changes: the table
@@ -98,7 +95,6 @@ private:
 
 	void Emit(DataChunk &output, idx_t &count, const char *change_type, const Cursor &cursor);
 	void ScanConflicts(DataChunk &output);
-	Value RowValue(const vector<Value> &values) const;
 	bool SameValues() const;
 	Value MergeStatus(const char *change_type, int64_t row_id) const;
 

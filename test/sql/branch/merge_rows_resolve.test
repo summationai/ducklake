@@ -1,5 +1,5 @@
 # name: test/sql/branch/merge_rows_resolve.test
-# description: rows both sides changed differently: the conflicts view, and on_conflict keeping main's or the branch's version
+# description: rows both sides changed differently: the conflicts view, on_conflict keeping main's or the branch's version, and a merge by hand
 # group: [branch]
 
 require ducklake
@@ -194,24 +194,30 @@ UPDATE m_branch SET price = 33 WHERE item = 'c'
 statement ok
 UPDATE m_branch SET price = 55 WHERE item = 'e'
 
-# the conflicts: what each side did, and the row at the fork, on the branch and on main
-query ITTTTTT
+# the conflicts: what each side did to each row
+query ITTT
 FROM ducklake_merge_branch('ducklake', 'bf', dry_run => true, table_name => 't_fail', conflicts_only => true)
 ----
-0	update	update	conflict	{'item': a, 'price': 1}	{'item': a, 'price': 10}	{'item': a, 'price': 11}
-1	update	delete	conflict	{'item': b, 'price': 2}	{'item': b, 'price': 20}	NULL
-2	delete	update	conflict	{'item': c, 'price': 3}	NULL	{'item': c, 'price': 33}
+0	update	update	conflict
+1	update	delete	conflict
+2	delete	update	conflict
 
-query I
-SELECT main.price FROM ducklake_merge_branch('ducklake', 'bf', dry_run => true, table_name => 't_fail', conflicts_only => true) WHERE main_change = 'update' ORDER BY rowid
+# their values side by side: the branch's from ducklake_branch_table, main's from the table, matched on rowid
+query ITTII
+SELECT c.rowid, c.branch_change, c.main_change, br.price, m.price
+FROM ducklake_merge_branch('ducklake', 'bf', dry_run => true, table_name => 't_fail', conflicts_only => true) c
+LEFT JOIN ducklake_branch_table('ducklake', 'bf', 't_fail') br ON br.rowid = c.rowid
+LEFT JOIN t_fail m ON m.rowid = c.rowid
+ORDER BY c.rowid
 ----
-11
-33
+0	update	update	10	11
+1	update	delete	20	NULL
+2	delete	update	NULL	33
 
 statement error
 MERGE BRANCH bf
 ----
-changed 3 row(s) of table "t_fail" differently since the fork (rowid 0, 1, 2); ducklake_merge_branch with dry_run => true, table_name => 't_fail' and conflicts_only => true shows them, and on_conflict => 'main' or 'branch' resolves them
+changed 3 row(s) of table "t_fail" differently since the fork (rowid 0, 1, 2). ducklake_merge_branch('ducklake', 'bf', dry_run => true, table_name => 't_fail', conflicts_only => true) lists them. Keep one side with ON CONFLICT KEEP MAIN or KEEP BRANCH, or merge them by hand: update main's rows from ducklake_branch_table('ducklake', 'bf', 't_fail'), matching on rowid, then MERGE BRANCH with ON CONFLICT KEEP MAIN
 
 # on_conflict in the dry run: the table merges, and each conflicting row says who wins
 query TTT
@@ -320,6 +326,75 @@ statement error
 MERGE BRANCH bf ON KEEP MAIN
 ----
 Expected CONFLICT KEEP after ON
+
+# a merge by hand: main takes a value of its own for one row and the branch's version of the row it deleted, keeps
+# its own change to the row the branch deleted, and then keeps main for the conflicts
+statement ok
+UPDATE t_fail SET price = 12 WHERE item = 'a'
+
+statement ok
+INSERT INTO t_fail SELECT item, price FROM ducklake_branch_table('ducklake', 'bf', 't_fail') WHERE rowid = 1
+
+statement error
+MERGE BRANCH bf
+----
+changed 3 row(s) of table "t_fail" differently since the fork (rowid 0, 1, 2)
+
+statement ok
+MERGE BRANCH bf ON CONFLICT KEEP MAIN
+
+query TI
+FROM t_fail ORDER BY item
+----
+a	12
+b	20
+c	33
+d	40
+e	55
+f	6
+
+# a table in another schema: the message names it
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE s.t(i INTEGER)
+
+statement ok
+INSERT INTO s.t VALUES (1)
+
+statement ok
+CREATE BRANCH bs
+
+statement ok
+SET BRANCH bs
+
+statement ok
+UPDATE s.t SET i = 2
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE s.t SET i = 3
+
+statement error
+MERGE BRANCH bs
+----
+ducklake_merge_branch('ducklake', 'bs', dry_run => true, table_name => 't', schema => 's', conflicts_only => true) lists them. Keep one side with ON CONFLICT KEEP MAIN or KEEP BRANCH, or merge them by hand: update main's rows from ducklake_branch_table('ducklake', 'bs', 't', schema => 's')
+
+query I
+SELECT i FROM ducklake_branch_table('ducklake', 'bs', 't', schema => 's')
+----
+2
+
+statement ok
+MERGE BRANCH bs ON CONFLICT KEEP MAIN
+
+query I
+FROM s.t
+----
+3
 
 # a table that conflicts as a whole is not resolved row by row
 statement ok
