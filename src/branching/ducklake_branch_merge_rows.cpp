@@ -37,6 +37,30 @@ string BranchTableSql(const string &catalog_name, const string &schema_name, con
 	       "." + DuckLakeUtil::SQLIdentifierToString(table_name);
 }
 
+void BranchTableColumns(ClientContext &context, const string &catalog_name, const string &branch_name,
+                        const string &schema_name, const string &table_name, vector<string> &names,
+                        vector<LogicalType> &types) {
+	auto connection = BranchSqlConnection(context, catalog_name, branch_name);
+	auto &branch_context = *connection->context;
+	branch_context.RunFunctionInTransaction([&]() {
+		QualifiedName name {Identifier(catalog_name), Identifier(schema_name), Identifier(table_name)};
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, name);
+		auto entry = Catalog::GetEntry(branch_context, lookup, OnEntryNotFound::RETURN_NULL);
+		if (!entry) {
+			throw InvalidInputException("Table \"%s.%s\" does not exist on branch \"%s\"", schema_name, table_name,
+			                            branch_name);
+		}
+		if (entry->type != CatalogType::TABLE_ENTRY) {
+			throw InvalidInputException("\"%s\" is a %s, not a table", table_name,
+			                            StringUtil::Lower(CatalogTypeToString(entry->type)));
+		}
+		for (auto &column : entry->Cast<DuckLakeTableEntry>().GetColumns().Logical()) {
+			names.push_back(column.Name().GetIdentifierName());
+			types.push_back(column.Type());
+		}
+	});
+}
+
 DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, DuckLakeCatalog &catalog,
                                                       const string &branch_name, const string &schema_name,
                                                       const string &table_name, DuckLakeConflictResolution on_conflict,
