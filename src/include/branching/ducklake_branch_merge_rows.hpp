@@ -26,6 +26,10 @@ unique_ptr<Connection> BranchSqlConnection(ClientContext &context, const string 
                                            const string &branch_name);
 //! "catalog"."schema"."table"
 string BranchTableSql(const string &catalog_name, const string &schema_name, const string &table_name);
+//! The columns of a table as a branch has it
+void BranchTableColumns(ClientContext &context, const string &catalog_name, const string &branch_name,
+                        const string &schema_name, const string &table_name, vector<string> &names,
+                        vector<LogicalType> &types);
 
 //! The rows of a query, one at a time
 struct DuckLakeBranchRowCursor {
