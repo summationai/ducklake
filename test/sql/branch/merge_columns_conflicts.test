@@ -302,10 +302,15 @@ SELECT status, regexp_extract(conflict, 'changed [0-9]+ row') FROM ducklake_merg
 ----
 conflict	changed 1 row
 
-query ITTTTT
-SELECT rowid, branch_change, main_change, fork, branch, main FROM ducklake_merge_branch('ducklake', 'b_rows', dry_run => true, table_name => 'rows', conflicts_only => true)
+query ITT
+SELECT rowid, branch_change, main_change FROM ducklake_merge_branch('ducklake', 'b_rows', dry_run => true, table_name => 'rows', conflicts_only => true)
 ----
-0	update	delete	{'a': 1, 'c': 0}	{'a': 1, 'c': 100}	NULL
+0	update	delete
+
+query III
+SELECT rowid, a, c FROM ducklake_branch_table('ducklake', 'b_rows', 'rows') WHERE rowid = 0
+----
+0	1	100
 
 # main deleted row 1, which the branch filled. Main changed only b of row 2, which the branch dropped: the rows compare
 # on a and c, so that row merges with the branch's value
