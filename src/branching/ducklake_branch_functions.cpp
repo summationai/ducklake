@@ -270,8 +270,7 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 		    DuckLakeMergeRowsScan::Bind(context, result->catalog, result->branch_name, schema_name,
 		                                table_name->second.GetValue<string>(), on_conflict, conflicts_only));
 		if (conflicts_only) {
-			// one row per row both sides changed differently: what each did, and the row at the fork and on each side
-			auto row_type = result->rows->RowType();
+			// one row per row both sides changed differently and what each did; ducklake_branch_table has the values
 			names.emplace_back("rowid");
 			return_types.emplace_back(LogicalType::BIGINT);
 			names.emplace_back("branch_change");
@@ -280,12 +279,6 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 			return_types.emplace_back(LogicalType::VARCHAR);
 			names.emplace_back("resolution");
 			return_types.emplace_back(LogicalType::VARCHAR);
-			names.emplace_back("fork");
-			return_types.push_back(row_type);
-			names.emplace_back("branch");
-			return_types.push_back(row_type);
-			names.emplace_back("main");
-			return_types.push_back(row_type);
 			return std::move(result);
 		}
 		// what the merge would do to the table's rows, in the terms of ducklake_table_changes
@@ -455,8 +448,8 @@ static unique_ptr<GlobalTableFunctionState> BranchTableInit(ClientContext &conte
 	auto &data = input.bind_data->Cast<DuckLakeBranchTableData>();
 	auto result = make_uniq<DuckLakeBranchTableState>();
 	result->connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
-	result->result = result->connection->Submit(
-	    "SELECT rowid, * FROM " + BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
+	result->result = result->connection->Submit("SELECT rowid, * FROM " +
+	                                            BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
 	if (result->result->HasError()) {
 		result->result->GetErrorObject().Throw();
 	}
