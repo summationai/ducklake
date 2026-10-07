@@ -37,6 +37,30 @@ string BranchTableSql(const string &catalog_name, const string &schema_name, con
 	       "." + DuckLakeUtil::SQLIdentifierToString(table_name);
 }
 
+void BranchTableColumns(ClientContext &context, const string &catalog_name, const string &branch_name,
+                        const string &schema_name, const string &table_name, vector<string> &names,
+                        vector<LogicalType> &types) {
+	auto connection = BranchSqlConnection(context, catalog_name, branch_name);
+	auto &branch_context = *connection->context;
+	branch_context.RunFunctionInTransaction([&]() {
+		QualifiedName name {Identifier(catalog_name), Identifier(schema_name), Identifier(table_name)};
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, name);
+		auto entry = Catalog::GetEntry(branch_context, lookup, OnEntryNotFound::RETURN_NULL);
+		if (!entry) {
+			throw InvalidInputException("Table \"%s.%s\" does not exist on branch \"%s\"", schema_name, table_name,
+			                            branch_name);
+		}
+		if (entry->type != CatalogType::TABLE_ENTRY) {
+			throw InvalidInputException("\"%s\" is a %s, not a table", table_name,
+			                            StringUtil::Lower(CatalogTypeToString(entry->type)));
+		}
+		for (auto &column : entry->Cast<DuckLakeTableEntry>().GetColumns().Logical()) {
+			names.push_back(column.Name().GetIdentifierName());
+			types.push_back(column.Type());
+		}
+	});
+}
+
 DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, DuckLakeCatalog &catalog,
                                                       const string &branch_name, const string &schema_name,
                                                       const string &table_name, DuckLakeConflictResolution on_conflict,
@@ -90,6 +114,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		}
 		result.fork_table_name = fork_entry->name.GetIdentifierName();
 		main_table_id = table.GetTableId();
+		DuckLakeBranchManager::ProjectColumns(table, fork_entry->Cast<DuckLakeTableEntry>(), result.branch_columns,
+		                                      result.fork_columns);
 	});
 	// how the merge treats rows main changed too since the fork
 	auto head = transaction.GetSnapshot();
@@ -122,7 +148,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	table.main_name = result.fork_table_name;
 	table.branch_name = table_name;
 	table.on_conflict = on_conflict;
-	table.keep_conflict_values = conflicts_only;
+	table.branch_columns = result.branch_columns;
+	table.main_columns = result.fork_columns;
 	DuckLakeBranchManager::PlanRowMerge(context, result.catalog_name, branch_name, result.fork_snapshot_id,
 	                                    head.snapshot_id, table);
 	result.conflict_rows.insert(table.conflicts.begin(), table.conflicts.end());
@@ -136,14 +163,6 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	return result;
 }
 
-LogicalType DuckLakeMergeRowsBindData::RowType() const {
-	child_list_t<LogicalType> children;
-	for (idx_t column = 0; column < column_names.size(); column++) {
-		children.emplace_back(column_names[column], column_types[column]);
-	}
-	return LogicalType::STRUCT(std::move(children));
-}
-
 DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckLakeMergeRowsBindData &data)
     : data(data), column_count(data.column_names.size()) {
 	if (data.conflicts_only) {
@@ -151,8 +170,11 @@ DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckL
 		return;
 	}
 	branch_connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
+	auto select_list = [](const vector<string> &columns) {
+		return columns.empty() ? string("*") : StringUtil::Join(columns, ", ");
+	};
 	branch_rows.Start(
-	    RunBranchSql(*branch_connection, "SELECT rowid, * FROM " +
+	    RunBranchSql(*branch_connection, "SELECT rowid, " + select_list(data.branch_columns) + " FROM " +
 	                                         BranchTableSql(data.catalog_name, data.schema_name, data.table_name) +
 	                                         " ORDER BY rowid"));
 	if (data.fork_table_name.empty()) {
@@ -160,11 +182,12 @@ DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckL
 	}
 	main_connection = make_uniq<Connection>(*context.db);
 	fork_rows.Start(RunBranchSql(
-	    *main_connection, StringUtil::Format("SELECT rowid, * FROM %s AT (VERSION => %d) ORDER BY rowid",
-	                                         BranchTableSql(data.catalog_name, data.schema_name, data.fork_table_name),
-	                                         data.fork_snapshot_id)));
+	    *main_connection,
+	    StringUtil::Format("SELECT rowid, %s FROM %s AT (VERSION => %d) ORDER BY rowid", select_list(data.fork_columns),
+	                       BranchTableSql(data.catalog_name, data.schema_name, data.fork_table_name),
+	                       data.fork_snapshot_id)));
 	if (fork_rows.result->ColumnCount() != branch_rows.result->ColumnCount()) {
-		// a branch changes no columns of main's tables
+		// both reads are projected onto the branch's columns
 		throw InternalException("A table of main has other columns on the branch than at its fork");
 	}
 }
@@ -223,20 +246,11 @@ Value DuckLakeMergeRowsScan::MergeStatus(const char *change_type, int64_t row_id
 	return Value("ok");
 }
 
-Value DuckLakeMergeRowsScan::RowValue(const vector<Value> &values) const {
-	vector<Value> fields;
-	for (idx_t column = 0; column < column_count; column++) {
-		fields.push_back(values[column].DefaultCastAs(data.column_types[column]));
-	}
-	return Value::STRUCT(data.RowType(), std::move(fields));
-}
-
 void DuckLakeMergeRowsScan::ScanConflicts(DataChunk &output) {
 	idx_t count = 0;
 	auto resolution = data.on_conflict == DuckLakeConflictResolution::KEEP_MAIN     ? "main wins"
 	                  : data.on_conflict == DuckLakeConflictResolution::KEEP_BRANCH ? "branch wins"
 	                                                                                : "conflict";
-	auto row_type = data.RowType();
 	for (; conflict_offset < data.conflict_details.size() && count < STANDARD_VECTOR_SIZE; conflict_offset++) {
 		auto &entry = data.conflict_details[conflict_offset];
 		auto &conflict = entry.second;
@@ -244,9 +258,6 @@ void DuckLakeMergeRowsScan::ScanConflicts(DataChunk &output) {
 		output.SetValue(1, count, Value(conflict.on_branch ? "update" : "delete"));
 		output.SetValue(2, count, Value(conflict.on_main ? "update" : "delete"));
 		output.SetValue(3, count, Value(resolution));
-		output.SetValue(4, count, RowValue(conflict.fork));
-		output.SetValue(5, count, conflict.on_branch ? RowValue(conflict.branch) : Value(row_type));
-		output.SetValue(6, count, conflict.on_main ? RowValue(conflict.main) : Value(row_type));
 		count++;
 	}
 	output.SetCardinality(count);

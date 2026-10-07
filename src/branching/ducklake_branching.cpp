@@ -19,6 +19,7 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetDropBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetSetBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetMergeBranchFunction());
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetBranchTableFunction());
 	DuckLakeCurrentBranchFunction current_branch;
 	loader.RegisterFunction(current_branch);
 	DuckLakeBranchesFunction branches;

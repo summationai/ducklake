@@ -55,6 +55,7 @@ Every `.cpp` file above that calls `DuckLakeBranching` also includes `branching/
 | `include/storage/ducklake_transaction.hpp` | `shared_ptr<DuckLakeBranchTransactionState> branch_state;` next to `state` | the transaction's branch state; opaque, so the header needs only a forward declaration |
 | | `friend class DuckLakeBranchManager;` in `DuckLakeTransaction` and `LocalTableChanges` | branching code reads the transaction's snapshot, connection and local changes |
 | `include/storage/ducklake_delete.hpp` | `friend class DuckLakeBranchManager;` | the branch delete writer uses `TryDropFullyDeletedFile` |
+| `include/storage/ducklake_table_entry.hpp` | `friend class DuckLakeBranchManager;` | a column a branch adds keeps the id its files were written with: the replay sets the table's `next_column_id`, and a branch table stores the real counter |
 | `include/common/ducklake_data_file.hpp` | `DuckLakeDeleteFile::created_by_ducklake` | marks delete files of earlier branch commits, as `DuckLakeDataFile::created_by_ducklake` already marks data files |
 | `include/storage/ducklake_transaction_state.hpp` | `DuckLakeCommitContext::pre_commit_check`, `extra_commit_sql`; the defaulted `pre_commit_check` parameter of `CheckForConflicts` | generic commit-loop extension points the merge uses |
 
@@ -67,6 +68,7 @@ compile in `src/branching/` when upstream changes them; that is where to fix it.
   `catalog_version`, `GetTransactionChanges()`
 - `LocalTableChanges`: `lock`, `changes`
 - `DuckLakeDelete`: `TryDropFullyDeletedFile`
+- `DuckLakeTableEntry`: `next_column_id`
 - `DuckLakeTransactionState` (public): `local_changes`, `dropped_files`, `dropped_file_stats`, `tables_deleted_from`,
   `tables_delete_attempted`, `flushed_inlined_tables`, `CheckForConflicts`, `CleanupFiles`, and the catalog changes
   `new_schemas`, `new_tables`, `dropped_tables`, `dropped_views`, `dropped_schemas`, `renamed_tables`, `renamed_views`,
@@ -86,6 +88,23 @@ transaction that created them. After a rebase, check:
 - `DuckLakeCatalogSet` indexes transaction-local schemas by id but not tables; `GetTableEntry` searches for them.
 - A rename on main writes a new `ducklake_table` / `ducklake_view` row and is published as a created table or view;
   the merge's rename checks (`RenamedOnMain`) depend on both.
+
+## Upstream behaviour column changes rely on
+
+A branch's ADD COLUMN and DROP COLUMN are stored in `ducklake_branching_column_change` and replayed through DuckLake's own
+`Alter`, so a merge commits them as a direct ALTER would. After a rebase, check:
+
+- `DuckLakeTableEntry::AlterTable(AddColumnInfo)` takes the new column's id from `next_column_id` when it is set
+  (`RequireNextColumnId`), and `DuckLakeFieldData::AddColumn` numbers nested fields depth first after it.
+  `AddColumnWithIds` sets the id on a copy of the table and checks the ids it gets.
+- Main hands out `MAX(column_id) + 1` over all of a table's `ducklake_column` rows (`GetNextColumnId`), so a dropped id
+  is never reused once it has a row. A table created and changed in one transaction writes its created columns and then
+  ends a dropped one, which is how a branch table keeps its dropped ids at merge. A column added and dropped again in
+  one transaction gets no row.
+- Scans match file columns by field id (`DuckLakeMultiFileReader`): a column missing in a file reads as its
+  `initial_default`, a dropped one is ignored.
+- DuckLake's conflict check fails an alter against another alter or drop of the table, and lets it pass after
+  concurrent inserts and deletes. `CheckColumnChanges` reports the first case by the table's name, before the commit.
 
 ## Upstream behaviour the row-by-row merge relies on
 

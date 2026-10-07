@@ -37,6 +37,8 @@ struct DuckLakeSnapshotCommit;
 struct SnapshotChangeInformation;
 struct TransactionChangeInformation;
 class DuckLakeDelete;
+class DuckLakeTableEntry;
+struct DuckLakeColumnInfo;
 
 struct DuckLakeBranchInfo {
 	idx_t branch_id = 0;
@@ -113,6 +115,10 @@ struct DuckLakeLoadedBranch {
 	set<string> main_changes;
 	//! Main tables the branch dropped
 	set<TableIndex> dropped_main_tables;
+	//! The column changes of the branch's tables, as stored in ducklake_branching_column_change
+	set<string> column_changes;
+	//! Whether the lake has ducklake_branching_column_change (lakes whose definition tables predate it do not)
+	bool has_column_change_table = false;
 };
 
 //! The catalog changes one branch commit writes
@@ -139,11 +145,8 @@ enum class DuckLakeConflictResolution : uint8_t {
 	KEEP_BRANCH
 };
 
-//! One row both sides changed differently: its values at the fork, on the branch and on main (none when deleted)
+//! One row both sides changed differently: whether each side still has it (updated) or deleted it
 struct DuckLakeRowConflict {
-	vector<Value> fork;
-	vector<Value> branch;
-	vector<Value> main;
 	bool on_branch = false;
 	bool on_main = false;
 };
@@ -158,13 +161,11 @@ struct DuckLakeRowMergeTable {
 	set<int64_t> overlap;
 	//! What to do with rows both sides changed differently
 	DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL;
-	//! Whether planning keeps each conflicting row's values (the dry run shows them)
-	bool keep_conflict_values = false;
 	//! The rows both sides changed differently that fail the merge
 	vector<int64_t> conflicts;
 	//! The rows both sides changed differently that on_conflict resolved
 	set<int64_t> resolved;
-	//! Every row both sides changed differently, with its values when keep_conflict_values is set
+	//! Every row both sides changed differently, with what each side did to it
 	map<int64_t, DuckLakeRowConflict> conflict_rows;
 	//! The rows both sides changed the same way
 	set<int64_t> same_as_main;
@@ -173,6 +174,10 @@ struct DuckLakeRowMergeTable {
 	//! Main's copies of rows the branch's change wins for: data file or inlined table at main's head -> (position,
 	//! row id)
 	map<string, vector<pair<idx_t, int64_t>>> main_rows_to_drop;
+	//! When the branch changed the table's columns: the columns read on the branch, and the same columns as main and
+	//! the fork read them (an added column as its initial default); empty when the columns are the same
+	vector<string> branch_columns;
+	vector<string> main_columns;
 };
 
 //! A branch being merged into main by the current transaction
@@ -319,12 +324,26 @@ public:
 	static bool IsDefinitionTablesCached(DuckLakeTransaction &transaction);
 	static void SetHasDefinitionTables(DuckLakeTransaction &transaction, bool value);
 	static const char *DefinitionTablesSql();
+	//! Whether the lake has the table of branch column changes (definition tables may predate it)
+	static bool HasColumnChangeTable(DuckLakeTransaction &transaction);
 	//! Rebuilds the branch's catalog changes in the transaction, before its files are loaded
 	static void LoadDefinitions(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch,
 	                            DuckLakeSnapshot fork_snapshot, DuckLakeLoadedBranch &loaded);
 	//! A table by id: one of main's at the snapshot, or one the transaction created
 	static optional_ptr<CatalogEntry> GetTableEntry(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
 	                                                TableIndex table_id);
+	//! The transaction's own version of a table: one it created, or one of main's whose columns or name it changed
+	static optional_ptr<DuckLakeTableEntry> LocalTableVersion(DuckLakeTransaction &transaction, TableIndex table_id);
+	//! A table as the transaction has it: its own version, or main's at the snapshot
+	static optional_ptr<CatalogEntry> CurrentTableEntry(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
+	                                                    TableIndex table_id);
+	//! The column id the table gives its next new column
+	static optional_idx NextColumnId(const DuckLakeTableEntry &table);
+	//! ADD COLUMN through DuckLake's own ALTER, with the column (and its nested fields) keeping the given ids
+	static unique_ptr<CatalogEntry> AddColumnWithIds(ClientContext &context, DuckLakeTransaction &transaction,
+	                                                 DuckLakeTableEntry &table, const DuckLakeColumnInfo &column);
+	//! Main's tables whose columns the transaction changed
+	static set<TableIndex> ColumnChangedMainTables(DuckLakeTransaction &transaction);
 	//! The transaction's id for a table id stored in a branch table
 	static TableIndex LocalTableId(const DuckLakeLoadedBranch &loaded, idx_t stored_id, const string &branch_name);
 	//! The table id stored in branch tables for one of the transaction's tables
@@ -343,7 +362,12 @@ public:
 	static void EnsureLoaded(DuckLakeTransaction &transaction);
 	//! The conflicts between a merge's catalog changes and main's that DuckLake's own rules let through
 	static void CheckMergeDefinitions(DuckLakeTransaction &transaction, const string &branch_name,
-	                                  DuckLakeSnapshot fork_snapshot, const SnapshotChangeInformation &other_changes);
+	                                  DuckLakeSnapshot fork_snapshot, const set<TableIndex> &column_changed_tables,
+	                                  const SnapshotChangeInformation &other_changes);
+	//! A branch's column changes to main's tables against main's changes to the same tables since the fork
+	static void CheckColumnChanges(DuckLakeTransaction &transaction, const string &branch_name,
+	                               DuckLakeSnapshot fork_snapshot, const set<TableIndex> &column_changed_tables,
+	                               const SnapshotChangeInformation &other_changes);
 	//! One of main's tables or views at a snapshot
 	static optional_ptr<CatalogEntry> GetMainEntry(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
 	                                               TableIndex id, CatalogType type);
@@ -363,10 +387,15 @@ public:
 	//! Why main's changes to a table since the fork keep it out of the row-by-row merge, if they do
 	static bool KeepsTableLevelRules(TableIndex table_id, bool branch_deleted, bool branch_deleted_inlined,
 	                                 const SnapshotChangeInformation &main_changes);
+	//! The columns of a table as the branch has it, and the same columns as main reads them: a column the branch added
+	//! as its initial default, a column it dropped left out
+	static void ProjectColumns(const DuckLakeTableEntry &branch_version, const DuckLakeTableEntry &main_version,
+	                           vector<string> &branch_columns, vector<string> &main_columns);
 	//! Reads both sides' changes to the table since the fork and decides each row both touched
 	static void PlanRowMerge(ClientContext &context, const string &catalog_name, const string &branch_name,
 	                         idx_t fork_snapshot_id, idx_t head_snapshot_id, DuckLakeRowMergeTable &table);
-	static string RowConflictMessage(const string &branch_name, const DuckLakeRowMergeTable &table);
+	static string RowConflictMessage(const string &catalog_name, const string &branch_name,
+	                                 const DuckLakeRowMergeTable &table);
 	//! Fails on rows the two sides changed differently; leaves out the branch's copies of rows main's copy stays for
 	static void ApplyRowMerge(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
 	//! Takes a table merged row by row out of DuckLake's insert and delete rules

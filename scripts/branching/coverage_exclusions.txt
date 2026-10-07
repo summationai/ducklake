@@ -35,4 +35,6 @@ src/branching/ducklake_branching.cpp | DuckLakeBranching::IsInlinedTablePinned |
 src/branching/ducklake_branching.cpp | DuckLakeBranching::AddKnownFiles | Failed to get branch files from Duc | the metadata catalog fails during orphan cleanup
 src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::HasDefinitionTables | Failed to probe DuckLake branch tabl | the metadata catalog fails for a reason other than a missing table
 src/branching/ducklake_branch_row_merge.cpp | DuckLakeBranchManager::MainChangesSince (lambda) | Failed to read main's changes since | the metadata catalog fails while the merge reads main's changes since the fork
-src/branching/ducklake_branch_merge_rows.cpp | RunBranchSql | result->GetErrorObject().Throw(); | an internal read of a table fails, i.e. its metadata or data files cannot be read
+src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::HasColumnChangeTable | Failed to probe DuckLake branch tabl | the metadata catalog fails for a reason other than a missing table
+src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::LoadDefinitions | Failed to read DuckLake branch column | the metadata catalog fails for a reason other than a missing table
+src/branching/ducklake_branch_functions.cpp | BranchTableInit | result->result->GetErrorObject().Throw(); | reading the table on the branch fails after its columns were read, i.e. its metadata or data files cannot be read
