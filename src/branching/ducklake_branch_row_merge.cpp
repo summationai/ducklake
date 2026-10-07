@@ -303,11 +303,6 @@ void DuckLakeBranchManager::PlanRowMerge(ClientContext &context, const string &c
 			auto &conflict = table.conflict_rows[row_id];
 			conflict.on_branch = branch.present;
 			conflict.on_main = main.present;
-			if (table.keep_conflict_values) {
-				conflict.fork = fork.values;
-				conflict.branch = branch.values;
-				conflict.main = main.values;
-			}
 			switch (table.on_conflict) {
 			case DuckLakeConflictResolution::KEEP_MAIN:
 				// as when both made the same change: the branch's copy goes, its deletes repeat main's
@@ -357,7 +352,8 @@ DuckLakeConflictResolution DuckLakeBranchManager::ParseConflictResolution(const 
 	throw InvalidInputException("on_conflict must be 'fail', 'main' or 'branch', not '%s'", value);
 }
 
-string DuckLakeBranchManager::RowConflictMessage(const string &branch_name, const DuckLakeRowMergeTable &table) {
+string DuckLakeBranchManager::RowConflictMessage(const string &catalog_name, const string &branch_name,
+                                                 const DuckLakeRowMergeTable &table) {
 	static constexpr idx_t ROWS_SHOWN = 10;
 	vector<int64_t> shown(table.conflicts.begin(),
 	                      table.conflicts.begin() + MinValue<idx_t>(ROWS_SHOWN, table.conflicts.size()));
@@ -365,11 +361,18 @@ string DuckLakeBranchManager::RowConflictMessage(const string &branch_name, cons
 	if (table.conflicts.size() > ROWS_SHOWN) {
 		rows += ", ...";
 	}
-	return StringUtil::Format("Transaction conflict - branch \"%s\" and main changed %d row(s) of table \"%s\" "
-	                          "differently since the fork (rowid %s); ducklake_merge_branch with dry_run => true, "
-	                          "table_name => '%s' and conflicts_only => true shows them, and on_conflict => 'main' or "
-	                          "'branch' resolves them",
-	                          branch_name, table.conflicts.size(), table.main_name, rows, table.branch_name);
+	auto literal = [](const string &text) {
+		return DuckLakeUtil::SQLLiteralToString(text);
+	};
+	auto schema = table.schema_name == DEFAULT_SCHEMA ? string() : ", schema => " + literal(table.schema_name);
+	auto catalog_and_branch = literal(catalog_name) + ", " + literal(branch_name);
+	return StringUtil::Format(
+	    "Transaction conflict - branch \"%s\" and main changed %d row(s) of table \"%s\" differently since the fork "
+	    "(rowid %s). ducklake_merge_branch(%s, dry_run => true, table_name => %s%s, conflicts_only => true) lists "
+	    "them. Keep one side with ON CONFLICT KEEP MAIN or KEEP BRANCH, or merge them by hand: update main's rows "
+	    "from ducklake_branch_table(%s, %s%s), matching on rowid, then MERGE BRANCH with ON CONFLICT KEEP MAIN",
+	    branch_name, table.conflicts.size(), table.main_name, rows, catalog_and_branch, literal(table.branch_name),
+	    schema, catalog_and_branch, literal(table.branch_name), schema);
 }
 
 void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge) {
@@ -381,7 +384,8 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 	for (auto &entry : merge.row_merge) {
 		auto &table = entry.second;
 		if (!table.conflicts.empty()) {
-			throw TransactionException(RowConflictMessage(merge.loaded.info.name, table));
+			throw TransactionException(
+			    RowConflictMessage(catalog.GetName().GetIdentifierName(), merge.loaded.info.name, table));
 		}
 		auto table_entry = GetTableEntry(transaction, merge.head_snapshot, table.table_id);
 		auto &table_data = table_entry->Cast<DuckLakeTableEntry>();

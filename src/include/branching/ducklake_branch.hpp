@@ -145,11 +145,8 @@ enum class DuckLakeConflictResolution : uint8_t {
 	KEEP_BRANCH
 };
 
-//! One row both sides changed differently: its values at the fork, on the branch and on main (none when deleted)
+//! One row both sides changed differently: whether each side still has it (updated) or deleted it
 struct DuckLakeRowConflict {
-	vector<Value> fork;
-	vector<Value> branch;
-	vector<Value> main;
 	bool on_branch = false;
 	bool on_main = false;
 };
@@ -164,13 +161,11 @@ struct DuckLakeRowMergeTable {
 	set<int64_t> overlap;
 	//! What to do with rows both sides changed differently
 	DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL;
-	//! Whether planning keeps each conflicting row's values (the dry run shows them)
-	bool keep_conflict_values = false;
 	//! The rows both sides changed differently that fail the merge
 	vector<int64_t> conflicts;
 	//! The rows both sides changed differently that on_conflict resolved
 	set<int64_t> resolved;
-	//! Every row both sides changed differently, with its values when keep_conflict_values is set
+	//! Every row both sides changed differently, with what each side did to it
 	map<int64_t, DuckLakeRowConflict> conflict_rows;
 	//! The rows both sides changed the same way
 	set<int64_t> same_as_main;
@@ -399,7 +394,8 @@ public:
 	//! Reads both sides' changes to the table since the fork and decides each row both touched
 	static void PlanRowMerge(ClientContext &context, const string &catalog_name, const string &branch_name,
 	                         idx_t fork_snapshot_id, idx_t head_snapshot_id, DuckLakeRowMergeTable &table);
-	static string RowConflictMessage(const string &branch_name, const DuckLakeRowMergeTable &table);
+	static string RowConflictMessage(const string &catalog_name, const string &branch_name,
+	                                 const DuckLakeRowMergeTable &table);
 	//! Fails on rows the two sides changed differently; leaves out the branch's copies of rows main's copy stays for
 	static void ApplyRowMerge(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
 	//! Takes a table merged row by row out of DuckLake's insert and delete rules

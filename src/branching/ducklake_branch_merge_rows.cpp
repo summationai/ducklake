@@ -148,7 +148,6 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	table.main_name = result.fork_table_name;
 	table.branch_name = table_name;
 	table.on_conflict = on_conflict;
-	table.keep_conflict_values = conflicts_only;
 	table.branch_columns = result.branch_columns;
 	table.main_columns = result.fork_columns;
 	DuckLakeBranchManager::PlanRowMerge(context, result.catalog_name, branch_name, result.fork_snapshot_id,
@@ -162,14 +161,6 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		}
 	}
 	return result;
-}
-
-LogicalType DuckLakeMergeRowsBindData::RowType() const {
-	child_list_t<LogicalType> children;
-	for (idx_t column = 0; column < column_names.size(); column++) {
-		children.emplace_back(column_names[column], column_types[column]);
-	}
-	return LogicalType::STRUCT(std::move(children));
 }
 
 DuckLakeMergeRowsScan::DuckLakeMergeRowsScan(ClientContext &context, const DuckLakeMergeRowsBindData &data)
@@ -255,20 +246,11 @@ Value DuckLakeMergeRowsScan::MergeStatus(const char *change_type, int64_t row_id
 	return Value("ok");
 }
 
-Value DuckLakeMergeRowsScan::RowValue(const vector<Value> &values) const {
-	vector<Value> fields;
-	for (idx_t column = 0; column < column_count; column++) {
-		fields.push_back(values[column].DefaultCastAs(data.column_types[column]));
-	}
-	return Value::STRUCT(data.RowType(), std::move(fields));
-}
-
 void DuckLakeMergeRowsScan::ScanConflicts(DataChunk &output) {
 	idx_t count = 0;
 	auto resolution = data.on_conflict == DuckLakeConflictResolution::KEEP_MAIN     ? "main wins"
 	                  : data.on_conflict == DuckLakeConflictResolution::KEEP_BRANCH ? "branch wins"
 	                                                                                : "conflict";
-	auto row_type = data.RowType();
 	for (; conflict_offset < data.conflict_details.size() && count < STANDARD_VECTOR_SIZE; conflict_offset++) {
 		auto &entry = data.conflict_details[conflict_offset];
 		auto &conflict = entry.second;
@@ -276,9 +258,6 @@ void DuckLakeMergeRowsScan::ScanConflicts(DataChunk &output) {
 		output.SetValue(1, count, Value(conflict.on_branch ? "update" : "delete"));
 		output.SetValue(2, count, Value(conflict.on_main ? "update" : "delete"));
 		output.SetValue(3, count, Value(resolution));
-		output.SetValue(4, count, RowValue(conflict.fork));
-		output.SetValue(5, count, conflict.on_branch ? RowValue(conflict.branch) : Value(row_type));
-		output.SetValue(6, count, conflict.on_main ? RowValue(conflict.main) : Value(row_type));
 		count++;
 	}
 	output.SetCardinality(count);
