@@ -48,6 +48,8 @@ struct DuckLakeBranchInfo {
 	idx_t next_file_seq = 0;
 	string status;
 	Value created_at;
+	//! When the branch was last committed to, or created when it never was; read by GetBranchesWithActivity only
+	Value last_activity;
 
 	bool IsActive() const {
 		return status == "active";
@@ -194,6 +196,26 @@ struct DuckLakeBranchMerge {
 	map<TableIndex, DuckLakeRowMergeTable> row_merge;
 };
 
+//! A branch the current transaction closes, in the main commit that creates the tables archiving it
+struct DuckLakeBranchClose {
+	//! The branch as found stale - it is closed only while its head is still there
+	DuckLakeBranchInfo info;
+	//! The archive tables, as schema.table
+	vector<string> archived_tables;
+	bool has_column_change_table = false;
+};
+
+//! A branch ducklake_close_stale_branches found stale, and what became of it
+struct DuckLakeStaleBranch {
+	DuckLakeBranchInfo info;
+	//! "closed", "would close" (a dry run) or "skipped"
+	string status;
+	//! The archive tables, as schema.table
+	vector<string> archived_tables;
+	//! Why the branch was skipped
+	string message;
+};
+
 //! Branch state of one DuckLake transaction, held by the transaction as an opaque pointer
 struct DuckLakeBranchTransactionState {
 	//! The branch the transaction reads and writes (if any)
@@ -207,6 +229,8 @@ struct DuckLakeBranchTransactionState {
 	std::thread::id loading_thread;
 	//! The branch the transaction merges into main on commit (if any)
 	unique_ptr<DuckLakeBranchMerge> merge;
+	//! The branch the transaction closes on commit (if any)
+	unique_ptr<DuckLakeBranchClose> close;
 };
 
 //! What merging a branch would do to one table
@@ -272,6 +296,11 @@ public:
 	//! The SQL that records the merge; part of the merge commit's batch
 	static string MergeBookkeepingSql(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
 	                                  bool with_snapshot);
+	//! Schedules the files of a branch for deletion
+	static string ScheduleBranchFilesSql(idx_t branch_id);
+	//! Deletes the rows describing a branch's files and catalog changes, its name, and with_commits its history
+	static string DeleteBranchRowsSql(DuckLakeTransaction &transaction, idx_t branch_id, bool with_commits,
+	                                  bool with_column_changes);
 	//! Filter on ducklake_snapshot rows that no active branch needs (its fork and everything after it)
 	static string ExpirableSnapshotFilter();
 	//! Writes the transaction's new local changes as the next branch commit
@@ -405,6 +434,25 @@ public:
 
 	//! A summary of the transaction's catalog changes, for ChangesFingerprint
 	static string CatalogChangesFingerprint(DuckLakeTransaction &transaction);
+
+	//===--------------------------------------------------------------------===//
+	// Closing stale branches (ducklake_branch_close.cpp)
+	//===--------------------------------------------------------------------===//
+	//! The active branches, with when each was last committed to
+	static vector<DuckLakeBranchInfo> GetBranchesWithActivity(DuckLakeTransaction &transaction);
+	//! Archives the tables of every branch without commits since older_than into main, then closes the branch; each
+	//! branch in a main commit of its own
+	static vector<DuckLakeStaleBranch> CloseStaleBranches(ClientContext &context, DuckLakeCatalog &catalog,
+	                                                      timestamp_tz_t older_than, const string &archive_schema,
+	                                                      bool dry_run);
+	static bool IsClosingBranch(DuckLakeTransaction &transaction);
+	static void SetBranchClose(DuckLakeTransaction &transaction, unique_ptr<DuckLakeBranchClose> close);
+	//! Fails the close when the branch was committed to, merged or dropped since it was found stale
+	static void CheckClose(DuckLakeTransaction &transaction, const DuckLakeBranchClose &close);
+	//! The SQL that records the close; part of the commit creating the archive tables
+	static string CloseBookkeepingSql(DuckLakeTransaction &transaction, const DuckLakeBranchClose &close,
+	                                  bool with_snapshot);
+	static void CommitClose(DuckLakeTransaction &transaction);
 
 private:
 	static void RebaseMainDeletes(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
