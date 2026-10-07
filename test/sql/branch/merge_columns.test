@@ -1,0 +1,179 @@
+# name: test/sql/branch/merge_columns.test
+# description: merging ADD COLUMN and DROP COLUMN made on a branch, while main inserts and changes rows
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_columns_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20)
+
+# m holds inlined rows
+statement ok
+CREATE TABLE m(a INTEGER, b INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'm')
+
+statement ok
+INSERT INTO m VALUES (1, 10)
+
+statement ok
+CREATE BRANCH x
+
+statement ok
+SET BRANCH x
+
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+ALTER TABLE t ADD COLUMN s STRUCT(p INTEGER)
+
+statement ok
+INSERT INTO t VALUES (3, 30, 33, {'p': 3})
+
+statement ok
+ALTER TABLE t DROP COLUMN b
+
+statement ok
+ALTER TABLE m ADD COLUMN c VARCHAR DEFAULT 'none'
+
+statement ok
+CREATE TABLE own(i INTEGER, j INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO own VALUES (1, 2, 3)
+
+statement ok
+ALTER TABLE own DROP COLUMN k
+
+statement ok
+ALTER TABLE own ADD COLUMN k VARCHAR DEFAULT 'new'
+
+# main writes rows with its own schema meanwhile
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO t VALUES (4, 40)
+
+statement ok
+DELETE FROM t WHERE a = 1
+
+statement ok
+INSERT INTO m VALUES (2, 20)
+
+statement ok
+SET VARIABLE before_merge = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+query TT
+SELECT table_name, branch_changes FROM ducklake_merge_branch('ducklake', 'x', dry_run => true) ORDER BY table_name
+----
+m	[altered]
+own	[created, inserted_into]
+t	[inserted_into, altered]
+
+statement ok
+MERGE BRANCH x
+
+# main's rows read an added column as its default; the dropped column is gone
+query IIT
+SELECT a, c, s FROM t ORDER BY a
+----
+2	5	NULL
+3	33	{'p': 3}
+4	5	NULL
+
+query IIT
+FROM m ORDER BY a
+----
+1	10	none
+2	20	none
+
+query IIT
+FROM own
+----
+1	2	new
+
+# main's catalog: the branch's ids, its initial defaults, the dropped column ended at the merge
+query ITTI
+SELECT column_id, column_name, initial_default, end_snapshot IS NULL FROM ducklake_meta.ducklake_column WHERE table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 't' AND end_snapshot IS NULL) ORDER BY column_id, begin_snapshot
+----
+1	a	NULL	true
+2	b	NULL	false
+3	c	5	true
+4	s	NULL	true
+5	p	NULL	true
+
+# the table the branch created keeps a row for the id of the column it dropped, so it is never handed out again
+query ITI
+SELECT column_id, column_name, (begin_snapshot = end_snapshot) IS TRUE FROM ducklake_meta.ducklake_column WHERE table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 'own') ORDER BY column_id
+----
+1	i	false
+2	j	false
+3	k__dropped_3	true
+4	k	false
+
+statement ok
+ALTER TABLE own ADD COLUMN later INTEGER
+
+query I
+SELECT column_id FROM ducklake_meta.ducklake_column WHERE column_name = 'later'
+----
+5
+
+# one snapshot, recording the changes as DuckLake's own ALTER does
+query T
+SELECT changes['tables_altered'] IS NOT NULL FROM ducklake_snapshots('ducklake') WHERE snapshot_id = getvariable('before_merge') + 1
+----
+true
+
+# the new column's stats come from the branch's file
+query II
+SELECT min_value, max_value FROM ducklake_meta.ducklake_file_column_stats WHERE column_id = 3 AND table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 't' AND end_snapshot IS NULL)
+----
+33	33
+
+# main before the merge still has b
+query II
+SELECT a, b FROM t AT (VERSION => getvariable('before_merge')) ORDER BY a
+----
+2	20
+4	40
+
+# the merge left a restartable lake
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_columns_files', METADATA_CATALOG 'ducklake_meta')
+
+query IIT
+SELECT a, c, s FROM ducklake.t ORDER BY a
+----
+2	5	NULL
+3	33	{'p': 3}
+4	5	NULL
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_column_change
+----
+0

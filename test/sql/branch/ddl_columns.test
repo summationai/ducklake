@@ -1,0 +1,198 @@
+# name: test/sql/branch/ddl_columns.test
+# description: ADD COLUMN and DROP COLUMN on a branch, on main's tables and on the branch's own; column ids stay fixed
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_columns_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE BRANCH x
+
+statement ok
+SET BRANCH x
+
+# a column added to a main table: rows written before it read its default
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+INSERT INTO t VALUES (3, 30, 33)
+
+query III
+FROM t ORDER BY a
+----
+1	10	5
+2	20	5
+3	30	33
+
+# a nested column: the column and its fields take the ids after c
+statement ok
+ALTER TABLE t ADD COLUMN s STRUCT(p INTEGER, q VARCHAR)
+
+statement ok
+UPDATE t SET s = {'p': a, 'q': 'v' || a} WHERE a = 3
+
+# a column dropped from a main table
+statement ok
+ALTER TABLE t DROP COLUMN b
+
+query IIT
+SELECT a, c, s FROM t ORDER BY a
+----
+1	5	NULL
+2	5	NULL
+3	33	{'p': 3, 'q': v3}
+
+query T
+SELECT string_agg(column_name, ',' ORDER BY column_index) FROM duckdb_columns() WHERE database_name = 'ducklake' AND table_name = 't'
+----
+a,c,s
+
+# the branch stores the ids it gave: c is 3, s is 4 with its fields 5 and 6; b (2) was dropped
+query ITIT
+SELECT change_seq, change_type, column_id, column_name FROM ducklake_meta.ducklake_branching_column_change ORDER BY change_seq, column_id
+----
+0	added	3	c
+1	added	4	s
+1	added	5	p
+1	added	6	q
+2	dropped	2	b
+
+# main is unaffected
+statement ok
+SET BRANCH main
+
+query II
+FROM t ORDER BY a
+----
+1	10
+2	20
+
+# main adds a column to the same table: it gets id 3 too, and the branch keeps reading its own c
+statement ok
+ALTER TABLE t ADD COLUMN m INTEGER DEFAULT 7
+
+statement ok
+INSERT INTO t VALUES (9, 90, 99)
+
+statement ok
+SET BRANCH x
+
+query II
+SELECT a, c FROM t ORDER BY a
+----
+1	5
+2	5
+3	33
+
+# add then drop, and drop then add a column with an old name: a new id
+statement ok
+ALTER TABLE t ADD COLUMN e INTEGER
+
+statement ok
+ALTER TABLE t DROP COLUMN e
+
+statement ok
+ALTER TABLE t ADD COLUMN b VARCHAR DEFAULT 'new b'
+
+query IT
+SELECT a, b FROM t ORDER BY a
+----
+1	new b
+2	new b
+3	new b
+
+query I
+SELECT column_id FROM ducklake_meta.ducklake_branching_column_change WHERE column_name = 'b' AND change_type = 'added'
+----
+8
+
+# a table the branch created: DROP COLUMN, and a later column never reuses the dropped id
+statement ok
+CREATE TABLE own(i INTEGER, j INTEGER, k INTEGER)
+
+statement ok
+INSERT INTO own VALUES (1, 2, 3)
+
+statement ok
+ALTER TABLE own DROP COLUMN k
+
+statement ok
+ALTER TABLE own ADD COLUMN k VARCHAR DEFAULT 'new'
+
+query IIT
+FROM own
+----
+1	2	new
+
+# what DuckLake still refuses
+statement ok
+CREATE TABLE single(only_column INTEGER)
+
+statement error
+ALTER TABLE single DROP COLUMN only_column
+----
+table only has one column remaining
+
+# everything survives a restart
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_columns_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH x
+
+query IITT
+SELECT a, c, b, s FROM t ORDER BY a
+----
+1	5	new b	NULL
+2	5	new b	NULL
+3	33	new b	{'p': 3, 'q': v3}
+
+query IIT
+FROM own
+----
+1	2	new
+
+statement ok
+ALTER TABLE own ADD COLUMN z INTEGER
+
+query I
+SELECT max(column_id) FROM ducklake_meta.ducklake_branching_column WHERE column_name = 'z'
+----
+5
+
+statement ok
+SET BRANCH main
+
+query III
+FROM t ORDER BY a
+----
+1	10	7
+2	20	7
+9	90	99

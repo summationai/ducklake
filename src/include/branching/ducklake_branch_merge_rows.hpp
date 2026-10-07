@@ -68,6 +68,10 @@ struct DuckLakeMergeRowsBindData {
 	vector<pair<int64_t, DuckLakeRowConflict>> conflict_details;
 	vector<string> column_names;
 	vector<LogicalType> column_types;
+	//! When the branch changed the table's columns: its columns, and the same columns as the fork has them (an added
+	//! column as its initial default); empty when the columns are the same
+	vector<string> branch_columns;
+	vector<string> fork_columns;
 
 	//! The table's row as one STRUCT
 	LogicalType RowType() const;

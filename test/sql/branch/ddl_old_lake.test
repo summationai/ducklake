@@ -42,6 +42,9 @@ statement ok
 DROP TABLE ducklake_meta.ducklake_branching_main_change
 
 statement ok
+DROP TABLE ducklake_meta.ducklake_branching_column_change
+
+statement ok
 USE memory
 
 statement ok
@@ -129,3 +132,37 @@ query II
 SELECT (SELECT SUM(i) FROM t), (SELECT answer FROM x)
 ----
 13	42
+
+# a lake whose definition tables predate column changes gets that table with the first column change
+statement ok
+DROP TABLE ducklake_meta.ducklake_branching_column_change
+
+statement ok
+CREATE BRANCH columns
+
+statement ok
+SET BRANCH columns
+
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 7
+
+query I
+SELECT DISTINCT c FROM t
+----
+7
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_column_change
+----
+1
+
+statement ok
+MERGE BRANCH columns
+
+query I
+SELECT DISTINCT c FROM t
+----
+7

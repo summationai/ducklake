@@ -34,36 +34,31 @@ CREATE BRANCH b
 statement ok
 SET BRANCH b
 
-# catalog changes to main's tables and views, other than renames and drops
-statement error
-ALTER TABLE t ADD COLUMN j INTEGER
-----
-Changing a main table other than renaming it is not supported on a branch yet (current branch: "b")
-
+# catalog changes to main's tables and views, other than renames, drops and adding or dropping columns
 statement error
 ALTER TABLE t RENAME COLUMN i TO k
 ----
-Changing a main table other than renaming it is not supported on a branch yet
+Changing a main table other than renaming it or adding and dropping columns is not supported on a branch yet (current branch: "b")
 
 statement error
 ALTER TABLE t ALTER COLUMN i SET DEFAULT 1
 ----
-Changing a main table other than renaming it is not supported on a branch yet
+Changing a main table other than renaming it or adding and dropping columns is not supported on a branch yet
 
 statement error
 ALTER TABLE t ALTER COLUMN i TYPE BIGINT
 ----
-Changing a main table other than renaming it is not supported on a branch yet
+Changing a main table other than renaming it or adding and dropping columns is not supported on a branch yet
 
 statement error
 ALTER TABLE t SET PARTITIONED BY (i)
 ----
-Changing a main table other than renaming it is not supported on a branch yet
+Changing a main table other than renaming it or adding and dropping columns is not supported on a branch yet
 
 statement error
 COMMENT ON TABLE t IS 'x'
 ----
-Changing a main table other than renaming it is not supported on a branch yet
+Changing a main table other than renaming it or adding and dropping columns is not supported on a branch yet
 
 statement error
 COMMENT ON VIEW main_view IS 'x'
@@ -86,14 +81,9 @@ CREATE TABLE with_options(i INTEGER) WITH (parquet_compression = 'zstd')
 ----
 CREATE TABLE ... WITH options is not supported on a branch yet
 
-# changes to a table created on the branch that do not keep its column ids
+# changes to a table created on the branch that change a column's type
 statement ok
 CREATE TABLE mine(i INTEGER, j INTEGER, s STRUCT(a INTEGER))
-
-statement error
-ALTER TABLE mine DROP COLUMN j
-----
-DROP COLUMN is not supported on a branch yet
 
 statement error
 ALTER TABLE mine ALTER COLUMN i TYPE BIGINT
