@@ -1,0 +1,147 @@
+# name: test/sql/branch/branch_transactions.test
+# description: transactions on a branch - rollback, multi-statement commits and concurrent commits
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_transactions_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(10)
+
+statement ok
+CREATE BRANCH b1
+
+statement ok
+SET BRANCH b1
+
+statement ok
+INSERT INTO t VALUES (100)
+
+statement ok
+DELETE FROM t WHERE i < 3
+
+# a rolled back transaction keeps the files of earlier branch commits
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (200)
+
+statement ok
+DELETE FROM t WHERE i = 100
+
+statement ok
+DELETE FROM t WHERE i >= 3 AND i < 6
+
+query I
+SELECT SUM(i) FROM t
+----
+230
+
+statement ok
+ROLLBACK
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+8	142
+
+# several statements commit as one branch commit
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_commit
+----
+2
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (300)
+
+statement ok
+UPDATE t SET i = i + 1000 WHERE i = 9
+
+statement ok
+COMMIT
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+9	1442
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_commit
+----
+3
+
+# a transaction that only reads adds no commit
+statement ok
+BEGIN
+
+query I
+SELECT COUNT(*) FROM t
+----
+9
+
+statement ok
+COMMIT
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_commit
+----
+3
+
+# branch statements cannot run inside a transaction
+statement ok
+BEGIN
+
+statement error
+CREATE BRANCH b2
+----
+cannot be used inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement error
+SET BRANCH main
+----
+cannot be used inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+# a commit message labels the branch commit
+statement ok
+BEGIN
+
+statement ok
+CALL ducklake_set_commit_message('ducklake', 'maya', 'raise prices', extra_info => 'what-if')
+
+statement ok
+UPDATE t SET i = i + 1 WHERE i = 300
+
+statement ok
+COMMIT
+
+query IIII
+SELECT author, commit_message, commit_extra_info, changes_made FROM ducklake_meta.ducklake_branching_commit ORDER BY commit_seq DESC LIMIT 1
+----
+maya	raise prices	what-if	inserted_into_table:1,deleted_from_table:1

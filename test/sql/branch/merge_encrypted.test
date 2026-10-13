@@ -1,0 +1,83 @@
+# name: test/sql/branch/merge_encrypted.test
+# description: merged data and rebased delete files on an encrypted lake stay encrypted
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+# the crypto backend does not matter here, only that keys are carried along
+statement ok
+SET force_mbedtls_unsafe = 'true'
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_encrypted_files', METADATA_CATALOG 'ducklake_meta', ENCRYPTED, DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(100)
+
+# main has a delete file at the fork, so the branch's deletes are rewritten at the merge
+statement ok
+DELETE FROM t WHERE i < 10
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+DELETE FROM t WHERE i >= 10 AND i < 20
+
+statement ok
+INSERT INTO t VALUES (1000)
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH b
+
+query II
+SELECT COUNT(*), MAX(i) FROM t
+----
+81	1000
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => 3)
+----
+90
+
+query II
+SELECT COUNT(*) FILTER (encryption_key IS NULL), COUNT(*) FROM ducklake_meta.ducklake_data_file
+----
+0	2
+
+query II
+SELECT COUNT(*) FILTER (encryption_key IS NULL), COUNT(*) FROM ducklake_meta.ducklake_delete_file
+----
+0	1
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_encrypted_files', METADATA_CATALOG 'ducklake_meta', ENCRYPTED, DATA_INLINING_ROW_LIMIT 0)
+
+query II
+SELECT COUNT(*), MAX(i) FROM ducklake.t
+----
+81	1000
