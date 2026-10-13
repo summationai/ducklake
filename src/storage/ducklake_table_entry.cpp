@@ -1,3 +1,4 @@
+#include "branching/ducklake_branching.hpp"
 #include "common/ducklake_types.hpp"
 #include "common/ducklake_util.hpp"
 #include "storage/ducklake_table_entry.hpp"
@@ -452,7 +453,7 @@ shared_ptr<DuckLakeTableStats> DuckLakeTableEntry::GetTableStats(DuckLakeTransac
 		return nullptr;
 	}
 	auto &dl_catalog = catalog.Cast<DuckLakeCatalog>();
-	if (transaction.HasTransactionLocalInserts(GetTableId())) {
+	if (!DuckLakeBranching::CanUseGlobalStats(transaction) || transaction.HasTransactionLocalInserts(GetTableId())) {
 		// no stats if there are transaction-local inserts
 		return nullptr;
 	}

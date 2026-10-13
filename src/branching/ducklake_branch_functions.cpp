@@ -25,7 +25,7 @@ static DuckLakeCatalog &GetBranchCatalog(ClientContext &context, const Value &ca
 static void EnsureWritable(DuckLakeCatalog &catalog, const string &statement) {
 	if (catalog.GetAttached().IsReadOnly()) {
 		throw InvalidInputException("%s requires DuckLake \"%s\" to be attached read-write", statement,
-		                            catalog.GetName().GetIdentifierName());
+		                            catalog.GetName());
 	}
 }
 
@@ -70,7 +70,7 @@ static unique_ptr<DuckLakeBranchFunctionData> BindBranchFunction(ClientContext &
 // ducklake_create_branch
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> CreateBranchBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = BindBranchFunction(context, input);
 	auto source = input.named_parameters.find("from_branch");
 	if (source != input.named_parameters.end() && !source->second.IsNull()) {
@@ -97,8 +97,8 @@ static void CreateBranchExecute(ClientContext &context, TableFunctionInput &data
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, data.catalog);
 	auto branch = DuckLakeBranchManager::CreateBranch(transaction, data.branch_name);
-	output.data[0].Append(Value(branch.name));
-	output.data[1].Append(Value::UBIGINT(branch.fork_snapshot_id));
+	output.SetValue(0, 0, Value(branch.name));
+	output.SetValue(1, 0, Value::UBIGINT(branch.fork_snapshot_id));
 	output.SetChildCardinality(1);
 	state.finished = true;
 }
@@ -114,7 +114,7 @@ TableFunction DuckLakeBranchFunctions::GetCreateBranchFunction() {
 // ducklake_drop_branch
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> DropBranchBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                               vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = BindBranchFunction(context, input);
 	auto if_exists = input.named_parameters.find("if_exists");
 	if (if_exists != input.named_parameters.end() && !if_exists->second.IsNull()) {
@@ -149,8 +149,8 @@ static void DropBranchExecute(ClientContext &context, TableFunctionInput &data_p
 		DuckLakeBranchManager::DropBranch(transaction, *branch);
 		GetBranchState(context).ClearIfSelected(data.catalog.GetOid(), branch->branch_id);
 	}
-	output.data[0].Append(Value(data.branch_name));
-	output.data[1].Append(Value::BOOLEAN(branch != nullptr));
+	output.SetValue(0, 0, Value(data.branch_name));
+	output.SetValue(1, 0, Value::BOOLEAN(branch != nullptr));
 	output.SetChildCardinality(1);
 	state.finished = true;
 }
@@ -166,7 +166,7 @@ TableFunction DuckLakeBranchFunctions::GetDropBranchFunction() {
 // ducklake_set_branch
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> SetBranchBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                              vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = BindBranchFunction(context, input);
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -193,7 +193,7 @@ static void SetBranchExecute(ClientContext &context, TableFunctionInput &data_p,
 		branch_state.Select(data.catalog.GetOid(), branch->branch_id, branch->name);
 		branch_name = branch->name;
 	}
-	output.data[0].Append(Value(branch_name));
+	output.SetValue(0, 0, Value(branch_name));
 	output.SetChildCardinality(1);
 	state.finished = true;
 }
@@ -220,7 +220,7 @@ static unique_ptr<GlobalTableFunctionState> MergeBranchInit(ClientContext &conte
 }
 
 static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = BindBranchFunction(context, input);
 	auto dry_run = input.named_parameters.find("dry_run");
 	if (dry_run != input.named_parameters.end() && !dry_run->second.IsNull()) {
@@ -390,9 +390,9 @@ static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_
 	// the statement's own commit performs the merge
 	auto branch =
 	    DuckLakeBranchManager::PrepareMerge(transaction, data.branch_name, data.commit_info.get(), data.on_conflict);
-	output.data[0].Append(Value(branch.name));
-	output.data[1].Append(Value::UBIGINT(branch.fork_snapshot_id));
-	output.data[2].Append(Value::UBIGINT(branch.head_seq));
+	output.SetValue(0, 0, Value(branch.name));
+	output.SetValue(1, 0, Value::UBIGINT(branch.fork_snapshot_id));
+	output.SetValue(2, 0, Value::UBIGINT(branch.head_seq));
 	output.SetChildCardinality(1);
 	state.started = true;
 }
@@ -416,13 +416,13 @@ struct DuckLakeBranchTableState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> BranchTableBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
 	if (input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
 		throw InvalidInputException("Branch and table name cannot be NULL");
 	}
 	auto result = make_uniq<DuckLakeBranchTableData>();
-	result->catalog_name = catalog.GetName().GetIdentifierName();
+	result->catalog_name = catalog.GetName();
 	result->branch_name = input.inputs[1].GetValue<string>();
 	result->table_name = input.inputs[2].GetValue<string>();
 	result->schema_name = "main";
@@ -448,7 +448,7 @@ static unique_ptr<GlobalTableFunctionState> BranchTableInit(ClientContext &conte
 	auto &data = input.bind_data->Cast<DuckLakeBranchTableData>();
 	auto result = make_uniq<DuckLakeBranchTableState>();
 	result->connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
-	result->result = result->connection->Submit("SELECT rowid, * FROM " +
+	result->result = result->connection->SendQuery("SELECT rowid, * FROM " +
 	                                            BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
 	if (result->result->HasError()) {
 		result->result->GetErrorObject().Throw();
@@ -467,8 +467,8 @@ static void BranchTableExecute(ClientContext &context, TableFunctionInput &data_
 		output.data[column].Reference(chunk->data[column]);
 	}
 	auto &row_ids = output.data[0];
-	auto row_id_data = FlatVector::GetDataMutable<int64_t>(row_ids);
-	auto &validity = FlatVector::ValidityMutable(row_ids);
+	auto row_id_data = FlatVector::GetData<int64_t>(row_ids);
+	auto &validity = FlatVector::Validity(row_ids);
 	for (idx_t row = 0; row < chunk->size(); row++) {
 		auto row_id = chunk->GetValue(0, row).GetValue<int64_t>();
 		if (DuckLakeConstants::IsTransactionLocalRowId(row_id)) {
@@ -520,7 +520,7 @@ struct DuckLakeCloseStaleState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> CloseStaleBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                               vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<DuckLakeCloseStaleData>(GetBranchCatalog(context, input.inputs[0]));
 	auto older_than = input.named_parameters.find("older_than");
 	if (older_than == input.named_parameters.end() || older_than->second.IsNull()) {
@@ -598,7 +598,7 @@ TableFunction DuckLakeBranchFunctions::GetCloseStaleBranchesFunction() {
 // ducklake_current_branch / ducklake_branches
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> CurrentBranchBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -613,7 +613,7 @@ static unique_ptr<FunctionData> CurrentBranchBind(ClientContext &context, TableF
 }
 
 static unique_ptr<FunctionData> BranchesBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                             vector<LogicalType> &return_types, vector<string> &names) {
 	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
 	names.emplace_back("branch_id");
 	return_types.emplace_back(LogicalType::UBIGINT);

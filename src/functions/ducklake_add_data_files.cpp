@@ -1,4 +1,5 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "common/ducklake_util.hpp"
 #include "storage/ducklake_transaction_changes.hpp"
@@ -1257,6 +1258,7 @@ static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInp
 	auto &state = data_p.global_state->Cast<DuckLakeAddDataFilesState>();
 	auto &bind_data = data_p.bind_data->Cast<DuckLakeAddDataFilesData>();
 	auto &transaction = DuckLakeTransaction::Get(context, bind_data.catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Adding data files");
 
 	if (state.finished) {
 		return;

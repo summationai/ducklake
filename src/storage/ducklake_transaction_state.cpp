@@ -279,6 +279,14 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 	for (auto &view_id : changes.altered_views) {
 		ConflictCheck(view_id, other_changes.altered_views, "alter view", "altered it");
 	}
+	for (auto &table_id : renamed_tables) {
+		ConflictCheck(table_id, other_changes.dropped_tables, "rename table", "dropped it");
+		ConflictCheck(table_id, other_changes.altered_tables, "rename table", "altered it");
+	}
+	for (auto &view_id : renamed_views) {
+		ConflictCheck(view_id, other_changes.dropped_views, "rename view", "dropped it");
+		ConflictCheck(view_id, other_changes.altered_views, "rename view", "altered it");
+	}
 }
 
 namespace {
@@ -1676,9 +1684,10 @@ WHERE idt.schema_version < (
 }
 
 SnapshotAndStats
-DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
-                                            const TransactionChangeInformation &changes,
-                                            const std::function<unique_ptr<QueryResult>(string)> &executor) {
+DuckLakeTransactionState::CheckForConflicts(
+    DuckLakeSnapshot transaction_snapshot, const TransactionChangeInformation &changes,
+    const std::function<unique_ptr<QueryResult>(string)> &executor,
+    const std::function<void(const SnapshotChangeInformation &)> &pre_commit_check) {
 	SnapshotAndStats snapshot_and_stats;
 	// get all changes made to the system after the current snapshot was started
 	auto changes_made = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor);
@@ -1687,6 +1696,9 @@ DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot transaction_snapsho
 
 	// now check for conflicts
 	CheckForConflicts(changes, other_changes, transaction_snapshot, executor);
+	if (pre_commit_check) {
+		pre_commit_check(other_changes);
+	}
 
 	return snapshot_and_stats;
 }
@@ -1702,11 +1714,11 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 		auto attempt_changes = transaction_changes;
 		try {
 			can_retry = false;
-			if (i > 0) {
+			if (i > 0 || context.pre_commit_check) {
 				// we failed our first commit due to another transaction committing
 				// retry - but first check for conflicts
-				commit_stats_snapshot =
-				    CheckForConflicts(transaction_snapshot, attempt_changes, context.conflict_query_executor);
+				commit_stats_snapshot = CheckForConflicts(transaction_snapshot, attempt_changes,
+				                                          context.conflict_query_executor, context.pre_commit_check);
 				stats = &commit_stats_snapshot.stats;
 			} else {
 				commit_stats_snapshot.snapshot = context.get_snapshot();
@@ -1722,6 +1734,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			string batch_queries = DuckLakeMetadataManager::InsertSnapshotSql();
 			batch_queries += CommitChanges(commit_state, attempt_changes, stats, context);
 			batch_queries += WriteSnapshotChanges(commit_state, attempt_changes, context.commit_info);
+			batch_queries += context.extra_commit_sql;
 			auto res = context.execute_commit_batch(commit_snapshot, batch_queries);
 			if (res->HasError()) {
 				res->GetErrorObject().Throw("Failed to flush changes into DuckLake: ");

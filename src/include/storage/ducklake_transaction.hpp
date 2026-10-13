@@ -43,6 +43,8 @@ class DuckLakeSchemaPinState;
 class DuckLakeFieldId;
 class LocalTableChangeIterationHelper;
 class DuckLakeTransactionState;
+class DuckLakeBranchManager;
+struct DuckLakeBranchTransactionState;
 
 struct FlushedInlinedTableInfo {
 	DuckLakeInlinedTableInfo inlined_table;
@@ -104,6 +106,7 @@ public:
 	                            unordered_map<string, vector<DuckLakeDeleteFile>> &delete_file_map);
 
 private:
+	friend class DuckLakeBranchManager;
 	mutable mutex lock;
 	map<TableIndex, LocalTableDataChanges> changes;
 };
@@ -167,6 +170,7 @@ struct DuckLakeRetryConfig {
 
 class DuckLakeTransaction : public Transaction, public enable_shared_from_this<DuckLakeTransaction> {
 	friend class DuckLakeTransactionState;
+	friend class DuckLakeBranchManager;
 
 public:
 	DuckLakeTransaction(DuckLakeCatalog &ducklake_catalog, TransactionManager &manager, ClientContext &context);
@@ -358,6 +362,8 @@ private:
 	//! Per-transaction mutable change state (new/dropped/renamed entries, local file changes, flushed
 	//! inlined tables) and the Commit loop. Owns the data formerly held directly on the transaction.
 	unique_ptr<DuckLakeTransactionState> state;
+	//! Branch state of the transaction (src/branching)
+	shared_ptr<DuckLakeBranchTransactionState> branch_state;
 	//! Snapshot cache for the AT (...) conditions that are referenced in the transaction
 	value_map_t<DuckLakeSnapshot> snapshot_cache;
 	//! New set of transaction-local name maps

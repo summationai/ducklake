@@ -1,4 +1,5 @@
 #include "storage/ducklake_scan.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
@@ -181,7 +182,8 @@ vector<PartitionStatistics> DuckLakeGetPartitionStats(ClientContext &context, Ge
 	// Only a full scan can filter by snapshot_id to get the correct historical count.
 	// Time travel can occur via: (1) per-query AT clause, or (2) catalog attached at historical snapshot
 	auto current_snapshot = transaction->GetSnapshot();
-	if (func_info.snapshot.snapshot_id != current_snapshot.snapshot_id || transaction->GetCatalog().CatalogSnapshot()) {
+	if (func_info.snapshot.snapshot_id != current_snapshot.snapshot_id || transaction->GetCatalog().CatalogSnapshot() ||
+	    !DuckLakeBranching::CanUseGlobalStats(*transaction)) {
 		return result;
 	}
 
