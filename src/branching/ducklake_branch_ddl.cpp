@@ -205,10 +205,10 @@ DuckLakeBranchObjectRows EncodeView(DuckLakeLoadedBranch &loaded, DuckLakeViewEn
 	auto &schema = view.ParentSchema().Cast<DuckLakeSchemaEntry>();
 	DuckLakeBranchObjectRows rows;
 	rows.object_type = VIEW_OBJECT;
-	rows.object_row = StringUtil::Format(
-	    "%d, 'view', %d, %s, %s, NULL, NULL, %s, %s, %s, NULL", object_id, StoredSchemaId(loaded, schema, allocate),
-	    Literal(view.name), Literal(view.GetViewUUID()), Literal(view.GetQuerySQL()),
-	    Literal(DuckLakeUtil::ToQuotedList(view.aliases)), ValueLiteral(view.comment));
+	rows.object_row = StringUtil::Format("%d, 'view', %d, %s, %s, NULL, NULL, %s, %s, %s, NULL", object_id,
+	                                     StoredSchemaId(loaded, schema, allocate), Literal(view.name),
+	                                     Literal(view.GetViewUUID()), Literal(view.GetQuerySQL()),
+	                                     Literal(DuckLakeUtil::ToQuotedList(view.aliases)), ValueLiteral(view.comment));
 	return rows;
 }
 
@@ -228,10 +228,9 @@ map<idx_t, DuckLakeBranchObjectRows> EncodeObjects(DuckLakeTransaction &transact
 			auto path = transaction.GetMetadataManager().GetRelativePath(schema.DataPath());
 			DuckLakeBranchObjectRows rows;
 			rows.object_type = SCHEMA_OBJECT;
-			rows.object_row =
-			    StringUtil::Format("%d, 'schema', NULL, %s, %s, %s, %s, NULL, NULL, NULL, NULL", object_id,
-			                       Literal(schema.name), Literal(schema.GetSchemaUUID()),
-			                       Literal(path.path), path.path_is_relative ? "true" : "false");
+			rows.object_row = StringUtil::Format("%d, 'schema', NULL, %s, %s, %s, %s, NULL, NULL, NULL, NULL",
+			                                     object_id, Literal(schema.name), Literal(schema.GetSchemaUUID()),
+			                                     Literal(path.path), path.path_is_relative ? "true" : "false");
 			result.emplace(object_id, std::move(rows));
 		}
 	}
@@ -1296,8 +1295,7 @@ void DuckLakeBranchManager::CheckColumnChanges(DuckLakeTransaction &transaction,
 			auto entry = MainEntryById(fork_set, id, CatalogType::TABLE_ENTRY);
 			throw TransactionException("Transaction conflict - branch \"%s\" changed the columns of table \"%s\", but "
 			                           "main %s it since the fork",
-			                           branch_name, entry ? entry->name : to_string(id.index),
-			                           main_action);
+			                           branch_name, entry ? entry->name : to_string(id.index), main_action);
 		}
 	}
 }
@@ -1320,8 +1318,8 @@ void DuckLakeBranchManager::CheckMergeDefinitions(DuckLakeTransaction &transacti
 		                           StringUtil::Equals(object_type, "table") ? CatalogType::TABLE_ENTRY
 		                                                                    : CatalogType::VIEW_ENTRY);
 		throw TransactionException("Transaction conflict - branch \"%s\" %s %s \"%s\", but main %s it since the fork",
-		                           branch_name, branch_action, object_type,
-		                           entry ? entry->name : to_string(id.index), main_action);
+		                           branch_name, branch_action, object_type, entry ? entry->name : to_string(id.index),
+		                           main_action);
 	};
 	auto contains = [](const set<TableIndex> &tables, TableIndex id) {
 		return tables.find(id) != tables.end();

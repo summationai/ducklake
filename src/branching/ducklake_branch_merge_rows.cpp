@@ -44,8 +44,9 @@ void BranchTableColumns(ClientContext &context, const string &catalog_name, cons
 	auto connection = BranchSqlConnection(context, catalog_name, branch_name);
 	auto &branch_context = *connection->context;
 	branch_context.RunFunctionInTransaction([&]() {
-		auto entry = Catalog::GetEntry(branch_context, catalog_name, schema_name,
-		                               EntryLookupInfo(CatalogType::TABLE_ENTRY, table_name), OnEntryNotFound::RETURN_NULL);
+		auto entry =
+		    Catalog::GetEntry(branch_context, catalog_name, schema_name,
+		                      EntryLookupInfo(CatalogType::TABLE_ENTRY, table_name), OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			throw InvalidInputException("Table \"%s.%s\" does not exist on branch \"%s\"", schema_name, table_name,
 			                            branch_name);
@@ -84,8 +85,9 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	auto &branch_context = *connection->context;
 	TableIndex main_table_id;
 	branch_context.RunFunctionInTransaction([&]() {
-		auto entry = Catalog::GetEntry(branch_context, result.catalog_name, schema_name,
-		                               EntryLookupInfo(CatalogType::TABLE_ENTRY, table_name), OnEntryNotFound::RETURN_NULL);
+		auto entry =
+		    Catalog::GetEntry(branch_context, result.catalog_name, schema_name,
+		                      EntryLookupInfo(CatalogType::TABLE_ENTRY, table_name), OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			throw InvalidInputException("Table \"%s.%s\" does not exist on branch \"%s\"", schema_name, table_name,
 			                            branch_name);

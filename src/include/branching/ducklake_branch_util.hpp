@@ -52,8 +52,9 @@ inline DuckLakeDeleteFile WriteBranchDeleteFile(ClientContext &context, WriteDel
 	for (auto &position : input.positions) {
 		positions.insert(NumericCast<idx_t>(position.position));
 	}
-	WriteDeleteFileInput plain {input.context,        input.transaction,    input.fs,           input.data_path,
-	                            input.encryption_key, input.data_file_path, std::move(positions), input.source};
+	WriteDeleteFileInput plain {input.context,        input.transaction,    input.fs,
+	                            input.data_path,      input.encryption_key, input.data_file_path,
+	                            std::move(positions), input.source};
 	return DuckLakeDeleteFileWriter::WriteDeletionVectorFile(context, plain);
 }
 

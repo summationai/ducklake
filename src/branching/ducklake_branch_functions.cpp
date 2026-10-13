@@ -448,8 +448,8 @@ static unique_ptr<GlobalTableFunctionState> BranchTableInit(ClientContext &conte
 	auto &data = input.bind_data->Cast<DuckLakeBranchTableData>();
 	auto result = make_uniq<DuckLakeBranchTableState>();
 	result->connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
-	result->result = result->connection->SendQuery("SELECT rowid, * FROM " +
-	                                            BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
+	result->result = result->connection->SendQuery(
+	    "SELECT rowid, * FROM " + BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
 	if (result->result->HasError()) {
 		result->result->GetErrorObject().Throw();
 	}

@@ -649,21 +649,20 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				file_id = next_file_id();
 				inserted_tables.insert(table_id);
 				auto path = metadata_manager.GetRelativePath(file.file_name);
-				AppendValues(data_rows,
-				             StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, NULL, %s, %s)",
-				                                file_id, branch_id, table_id.index, new_seq,
-				                                DuckLakeUtil::SQLLiteralToString(path.path),
-				                                path.path_is_relative ? "true" : "false", file.row_count,
-				                                file.file_size_bytes, OptionalToSQL(file.footer_size),
-				                                OptionalToSQL(file.partition_id),
-				                                DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key)));
+				AppendValues(
+				    data_rows,
+				    StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, NULL, %s, %s)", file_id,
+				                       branch_id, table_id.index, new_seq, DuckLakeUtil::SQLLiteralToString(path.path),
+				                       path.path_is_relative ? "true" : "false", file.row_count, file.file_size_bytes,
+				                       OptionalToSQL(file.footer_size), OptionalToSQL(file.partition_id),
+				                       DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key)));
 				for (auto &stats_entry : file.column_stats) {
 					auto stats = DuckLakeColumnStatsInfo::FromColumnStats(stats_entry.first, stats_entry.second);
-					AppendValues(stats_rows,
-					             StringUtil::Format("(%d, %d, %d, %d, %s, %s, %s, %s, %s, %s, %s, NULL, NULL)", file_id,
-					                                branch_id, table_id.index, stats_entry.first.index,
-					                                stats.column_size_bytes, stats.value_count, stats.null_count,
-					                                stats.min_val, stats.max_val, stats.contains_nan, stats.extra_stats));
+					AppendValues(stats_rows, StringUtil::Format(
+					                             "(%d, %d, %d, %d, %s, %s, %s, %s, %s, %s, %s, NULL, NULL)", file_id,
+					                             branch_id, table_id.index, stats_entry.first.index,
+					                             stats.column_size_bytes, stats.value_count, stats.null_count,
+					                             stats.min_val, stats.max_val, stats.contains_nan, stats.extra_stats));
 				}
 				for (auto &partition : file.partition_values) {
 					auto value = partition.partition_value.IsNull()
@@ -1248,8 +1247,8 @@ DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &tran
 	auto context_ref = transaction.context.lock();
 	for (auto &table : merge->row_merge) {
 		table.second.on_conflict = on_conflict;
-		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName(), branch->name,
-		             branch->fork_snapshot_id, merge->head_snapshot.snapshot_id, table.second);
+		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName(), branch->name, branch->fork_snapshot_id,
+		             merge->head_snapshot.snapshot_id, table.second);
 	}
 	ApplyRowMerge(transaction, *merge);
 	RebaseMainDeletes(transaction, *merge);
@@ -1612,8 +1611,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 	auto head_snapshot = transaction.GetSnapshot();
 	for (auto &table : row_merge) {
 		table.second.on_conflict = on_conflict;
-		PlanRowMerge(context, catalog.GetName(), name, branch->fork_snapshot_id,
-		             head_snapshot.snapshot_id, table.second);
+		PlanRowMerge(context, catalog.GetName(), name, branch->fork_snapshot_id, head_snapshot.snapshot_id,
+		             table.second);
 	}
 	set<TableIndex> main_tables, main_views;
 	for (auto &entry : entries) {
@@ -1687,8 +1686,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		}
 		check(entry, object_changes);
 		if (row_merged != row_merge.end() && entry.conflict.empty() && !row_merged->second.conflicts.empty()) {
-			entry.conflict =
-			    RowConflictMessage(transaction.GetCatalog().GetName(), name, row_merged->second);
+			entry.conflict = RowConflictMessage(transaction.GetCatalog().GetName(), name, row_merged->second);
 		}
 		if (table_local_changes != all_local_changes.end()) {
 			table_local_changes->second = std::move(local_changes.changes[table_id]);

@@ -225,10 +225,10 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 		return false;
 	}
 	auto newest_fork = *std::max_element(forks.begin(), forks.end());
-	auto result = transaction.Query(StringUtil::Format(
-	    "SELECT 1 FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d AND (end_snapshot IS NULL OR end_snapshot > %d) "
-	    "LIMIT 1",
-	    inlined_table.table_name, newest_fork, newest_fork));
+	auto result = transaction.Query(StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d "
+	                                                   "AND (end_snapshot IS NULL OR end_snapshot > %d) "
+	                                                   "LIMIT 1",
+	                                                   inlined_table.table_name, newest_fork, newest_fork));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
 	}

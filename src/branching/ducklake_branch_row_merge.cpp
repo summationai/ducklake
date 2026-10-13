@@ -378,14 +378,12 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 	for (auto &entry : merge.row_merge) {
 		auto &table = entry.second;
 		if (!table.conflicts.empty()) {
-			throw TransactionException(
-			    RowConflictMessage(catalog.GetName(), merge.loaded.info.name, table));
+			throw TransactionException(RowConflictMessage(catalog.GetName(), merge.loaded.info.name, table));
 		}
 		auto table_entry = GetTableEntry(transaction, merge.head_snapshot, table.table_id);
 		auto &table_data = table_entry->Cast<DuckLakeTableEntry>();
 		auto &schema = table_data.ParentSchema().Cast<DuckLakeSchemaEntry>();
-		bool use_deletion_vectors =
-		    catalog.WriteDeletionVectors(schema.GetSchemaId(), table.table_id);
+		bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table.table_id);
 		// what to change, read under the lock: the files themselves are read and written outside it
 		struct BranchFileDrop {
 			string data_file;
@@ -454,8 +452,7 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 			                            drop.data_file,
 			                            std::move(drop.positions),
 			                            DeleteFileSource::REGULAR};
-			written_files.emplace_back(drop.data_file,
-			                           WriteBranchDeleteFile(context, input, use_deletion_vectors));
+			written_files.emplace_back(drop.data_file, WriteBranchDeleteFile(context, input, use_deletion_vectors));
 		}
 		for (auto &written : written_files) {
 			local_changes.TransactionLocalDelete(context, table.table_id, written.first, std::move(written.second));
