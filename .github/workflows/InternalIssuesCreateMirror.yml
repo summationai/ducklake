@@ -1,11 +1,6 @@
 name: Create or Label Mirror Issue
 on:
-  discussion:
-    types:
-      - labeled
-  issues:
-    types:
-      - labeled
+  workflow_dispatch:
 
 env:
   GH_TOKEN: ${{ secrets.DUCKDBLABS_BOT_TOKEN }}
