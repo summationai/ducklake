@@ -376,7 +376,7 @@ SET BRANCH missing_parent_schema
 statement error
 SELECT COUNT(*) FROM t
 ----
-Branch "missing_parent_schema" has a nested schema, which this DuckLake version does not have
+Branch "missing_parent_schema" has a schema whose parent schema is missing
 
 statement ok
 SET BRANCH main

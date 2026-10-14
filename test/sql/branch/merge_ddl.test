@@ -180,7 +180,7 @@ SELECT map_keys(changes) FROM ducklake_snapshots('ducklake') ORDER BY snapshot_i
 [schemas_created, schemas_dropped, tables_created, views_created, tables_dropped, tables_altered, tables_inserted_into, views_dropped, views_altered]
 
 query T
-SELECT list_sort(changes['tables_created']) FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
+SELECT changes['tables_created'] FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
 ----
 [main.c, main.renamed_new, s.x]
 
@@ -328,6 +328,61 @@ statement error
 FROM c
 ----
 does not exist
+
+# nested schemas, on a lake with 1.1 metadata
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/merge_ddl_nested_files', METADATA_CATALOG 'nested_meta')
+
+statement ok
+CREATE SCHEMA nested.outer_s
+
+statement ok
+CALL ducklake_create_branch('nested', 'nb')
+
+statement ok
+CALL ducklake_set_branch('nested', 'nb')
+
+statement ok
+CREATE SCHEMA nested.outer_s.inner_s
+
+statement ok
+CREATE SCHEMA nested.mine
+
+statement ok
+CREATE SCHEMA nested.mine.deeper
+
+statement ok
+CREATE TABLE nested.mine.deeper.answers AS SELECT 42 AS answer
+
+statement ok
+CREATE TABLE nested.outer_s.inner_s.u AS SELECT 7 AS x
+
+statement ok
+CALL ducklake_set_branch('nested', 'main')
+
+statement ok
+CALL ducklake_merge_branch('nested', 'nb')
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'nested' ORDER BY ALL
+----
+deeper	answers
+inner_s	u
+
+query I
+FROM nested.mine.deeper.answers
+----
+42
+
+query I
+FROM nested.outer_s.inner_s.u
+----
+7
+
+query I
+SELECT COUNT(*) FROM nested_meta.ducklake_schema WHERE end_snapshot IS NULL AND parent_schema_id IS NOT NULL
+----
+2
 
 # a table the branch renamed merges row by row with main's changes to its rows, read under its name on the branch
 statement ok

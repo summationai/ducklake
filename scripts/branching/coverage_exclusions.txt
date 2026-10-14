@@ -10,6 +10,8 @@ src/branching/ducklake_branch_parser.cpp | DuckLakeBranchParseData::Copy | Copy(
 src/branching/ducklake_branch_parser.cpp | BranchTokenReader::SkipComments | position++; | DuckDB passes parser extensions a token stream without comment tokens; kept because the COMMENT token type exists
 src/branching/ducklake_branch_parser.cpp | BranchTokenReader::AtEnd | return true; | DuckDB's token stream always ends with an end-of-input token; reading past it is defensive
 src/branching/ducklake_branch.cpp | ResolveMainFiles | references table %d whic | a data file visible at the fork belongs to a table that exists at the fork; damaged file ids fail the check after it (tested in branch_corruption)
+src/branching/ducklake_branch_row_merge.cpp | LoadRowIds | statement->GetErrorObject().Throw(); | a fixed INSERT into the temp table the function just created on the same connection; preparing it cannot fail
+src/branching/ducklake_branch_row_merge.cpp | LoadRowIds | result->GetErrorObject().Throw(); | inserting BIGINT row ids into that temp table fails only when the connection runs out of memory
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::PreviewMerge (lambda) | deleted from data file %d | already checked when the branch is loaded (ResolveMainFiles, tested in branch_corruption)
 src/branching/ducklake_branch.cpp | LoadFileDetails | continue; | stats and partition rows of branch files not visible at the head, or of tables or columns missing: a branch drops no columns, and a commit that ends a file deletes its stats and partition rows
 src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::GetTableEntry | return nullptr; | asked only for tables whose files the transaction holds, which it created

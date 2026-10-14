@@ -103,7 +103,8 @@ public:
 	//! ducklake_flush_inlined_data - inlined rows an open branch sees at its fork stay inlined
 	static bool IsInlinedTablePinned(DuckLakeTransaction &transaction, const DuckLakeInlinedTableInfo &inlined_table);
 	//! DuckLakeMetadataManager::GetOrphanFilesForCleanup - branch files are not orphans
-	static void AddKnownFiles(DuckLakeTransaction &transaction, vector<string> &known_files);
+	static void AddKnownFiles(DuckLakeTransaction &transaction, unordered_set<string> &known_files,
+	                          const std::function<string(const string &)> &canonical_path);
 };
 
 } // namespace duckdb
