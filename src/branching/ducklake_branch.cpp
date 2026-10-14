@@ -228,32 +228,45 @@ void DuckLakeBranchManager::DropBranch(DuckLakeTransaction &transaction, const D
 	if (updated_rows != 1) {
 		throw TransactionException("Branch \"%s\" was changed or dropped by another transaction - retry", branch.name);
 	}
-	string query = StringUtil::Format(R"(
+	auto query =
+	    ScheduleBranchFilesSql(id) + DeleteBranchRowsSql(transaction, id, true, HasColumnChangeTable(transaction));
+	RunBranchQuery(transaction, std::move(query), "Failed to drop DuckLake branch: ");
+}
+
+string DuckLakeBranchManager::ScheduleBranchFilesSql(idx_t branch_id) {
+	return StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
 SELECT branch_file_id, path, path_is_relative, NOW() FROM {METADATA_CATALOG}.ducklake_branching_data_file WHERE branch_id = %d
 UNION ALL
 SELECT branch_file_id, path, path_is_relative, NOW() FROM {METADATA_CATALOG}.ducklake_branching_delete_file WHERE branch_id = %d;
 )",
-	                                  id, id);
+	                          branch_id, branch_id);
+}
+
+string DuckLakeBranchManager::DeleteBranchRowsSql(DuckLakeTransaction &transaction, idx_t branch_id, bool with_commits,
+                                                  bool with_column_changes) {
 	vector<string> branch_tables {"ducklake_branching_data_file",
 	                              "ducklake_branching_delete_file",
 	                              "ducklake_branching_file_column_stats",
 	                              "ducklake_branching_file_partition_value",
 	                              "ducklake_branching_inlined_delete",
 	                              "ducklake_branching_dropped_file",
-	                              "ducklake_branching_commit",
 	                              "ducklake_branching_name"};
+	if (with_commits) {
+		branch_tables.push_back("ducklake_branching_commit");
+	}
 	if (HasDefinitionTables(transaction)) {
 		branch_tables.insert(branch_tables.end(), {"ducklake_branching_object", "ducklake_branching_column",
 		                                           "ducklake_branching_main_change"});
 	}
-	if (HasColumnChangeTable(transaction)) {
+	if (with_column_changes) {
 		branch_tables.push_back("ducklake_branching_column_change");
 	}
+	string sql;
 	for (auto &table : branch_tables) {
-		query += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %d;\n", table, id);
+		sql += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %d;\n", table, branch_id);
 	}
-	RunBranchQuery(transaction, std::move(query), "Failed to drop DuckLake branch: ");
+	return sql;
 }
 
 //===--------------------------------------------------------------------===//
@@ -1757,23 +1770,7 @@ string DuckLakeBranchManager::MergeBookkeepingSql(DuckLakeTransaction &transacti
 		sql += "INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion VALUES " + scheduled + ";\n";
 	}
 	// main owns the branch's data files now - only the bookkeeping rows go
-	vector<string> branch_tables {"ducklake_branching_data_file",
-	                              "ducklake_branching_delete_file",
-	                              "ducklake_branching_file_column_stats",
-	                              "ducklake_branching_file_partition_value",
-	                              "ducklake_branching_inlined_delete",
-	                              "ducklake_branching_dropped_file",
-	                              "ducklake_branching_name"};
-	if (HasDefinitionTables(transaction)) {
-		branch_tables.insert(branch_tables.end(), {"ducklake_branching_object", "ducklake_branching_column",
-		                                           "ducklake_branching_main_change"});
-	}
-	if (merge.loaded.has_column_change_table) {
-		branch_tables.push_back("ducklake_branching_column_change");
-	}
-	for (auto &table : branch_tables) {
-		sql += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %d;\n", table, id);
-	}
+	sql += DeleteBranchRowsSql(transaction, id, false, merge.loaded.has_column_change_table);
 	return sql;
 }
 
