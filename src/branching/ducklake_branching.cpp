@@ -107,6 +107,26 @@ void DuckLakeBranching::DeleteSnapshots(DuckLakeTransaction &transaction,
 }
 
 //===--------------------------------------------------------------------===//
+// Catalog changes on a branch
+//===--------------------------------------------------------------------===//
+void DuckLakeBranching::CheckCreate(DuckLakeTransaction &transaction, CatalogEntry &entry) {
+	DuckLakeBranchManager::CheckCreate(transaction, entry);
+}
+
+void DuckLakeBranching::CheckDrop(DuckLakeTransaction &transaction, CatalogEntry &entry) {
+	DuckLakeBranchManager::CheckDrop(transaction, entry);
+}
+
+void DuckLakeBranching::CheckAlter(DuckLakeTransaction &transaction, CatalogEntry &entry,
+                                   optional_ptr<CatalogEntry> new_entry) {
+	DuckLakeBranchManager::CheckAlter(transaction, entry, new_entry);
+}
+
+void DuckLakeBranching::EnsureLoaded(DuckLakeTransaction &transaction) {
+	DuckLakeBranchManager::EnsureLoaded(transaction);
+}
+
+//===--------------------------------------------------------------------===//
 // Reading and writing on a branch
 //===--------------------------------------------------------------------===//
 idx_t DuckLakeBranching::InliningLimit(DuckLakeTransaction &transaction, idx_t limit) {

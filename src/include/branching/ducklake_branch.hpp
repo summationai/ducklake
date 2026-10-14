@@ -23,6 +23,7 @@
 #include <thread>
 
 namespace duckdb {
+class CatalogEntry;
 class ClientContext;
 class DuckLakeCatalog;
 class DuckLakeTransaction;
@@ -72,6 +73,18 @@ private:
 	unordered_map<idx_t, Selection> selections;
 };
 
+//! A catalog object the branch created, as stored in ducklake_branching_object and ducklake_branching_column
+//! (without the branch id and sequence number that lead each row)
+struct DuckLakeBranchObjectRows {
+	string object_type;
+	string object_row;
+	vector<string> column_rows;
+
+	bool operator==(const DuckLakeBranchObjectRows &other) const {
+		return object_row == other.object_row && column_rows == other.column_rows;
+	}
+};
+
 //! The branch head as loaded into a transaction - used to find what a commit adds
 struct DuckLakeLoadedBranch {
 	DuckLakeBranchInfo info;
@@ -91,6 +104,27 @@ struct DuckLakeLoadedBranch {
 		string branch_delete_file;
 	};
 	vector<MainDelete> main_deletes;
+	//! Catalog objects the branch created: branch object id -> the transaction's id, and back
+	unordered_map<idx_t, idx_t> local_ids;
+	unordered_map<idx_t, idx_t> object_ids;
+	//! Their stored definitions (branch object id -> rows)
+	map<idx_t, DuckLakeBranchObjectRows> objects;
+	//! What the branch did to main's catalog objects, as stored in ducklake_branching_main_change
+	set<string> main_changes;
+	//! Main tables the branch dropped
+	set<TableIndex> dropped_main_tables;
+};
+
+//! The catalog changes one branch commit writes
+struct DuckLakeBranchDefinitionChanges {
+	string batch;
+	string changes_made;
+	//! Whether the batch creates the definition tables (a lake whose branch tables predate them)
+	bool creates_tables = false;
+
+	bool HasChanges() const {
+		return !batch.empty();
+	}
 };
 
 //! A table both sides changed rows of since the fork, merged row by row: where to read it, and what the merge does to
@@ -154,6 +188,10 @@ struct DuckLakeMergePreviewEntry {
 	idx_t rows_deleted = 0;
 	//! Branch data files main takes over
 	idx_t files_added = 0;
+	//! "table", "view" or "schema"
+	string object_type = "table";
+	//! The new name, when the branch renamed the object
+	string new_name;
 	//! What the branch did to the table, in the terms of ducklake_snapshots
 	vector<string> branch_changes;
 	//! What main did to the table since the fork
@@ -242,6 +280,42 @@ public:
 	                              DuckLakeDeleteFile &delete_file);
 
 	//===--------------------------------------------------------------------===//
+	// Catalog changes on a branch (ducklake_branch_ddl.cpp)
+	//===--------------------------------------------------------------------===//
+	//! Whether the tables holding a branch's catalog changes exist - lakes whose branch tables predate them lack them
+	static bool HasDefinitionTables(DuckLakeTransaction &transaction);
+	static bool IsDefinitionTablesCached(DuckLakeTransaction &transaction);
+	static void SetHasDefinitionTables(DuckLakeTransaction &transaction, bool value);
+	static const char *DefinitionTablesSql();
+	//! Rebuilds the branch's catalog changes in the transaction, before its files are loaded
+	static void LoadDefinitions(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch,
+	                            DuckLakeSnapshot fork_snapshot, DuckLakeLoadedBranch &loaded);
+	//! A table by id: one of main's at the snapshot, or one the transaction created
+	static optional_ptr<CatalogEntry> GetTableEntry(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
+	                                                TableIndex table_id);
+	//! The transaction's id for a table id stored in a branch table
+	static TableIndex LocalTableId(const DuckLakeLoadedBranch &loaded, idx_t stored_id, const string &branch_name);
+	//! The table id stored in branch tables for one of the transaction's tables
+	static idx_t StoredTableId(const DuckLakeLoadedBranch &loaded, TableIndex table_id);
+	//! The catalog changes the transaction adds to the branch; gives new branch objects their ids
+	static DuckLakeBranchDefinitionChanges WriteDefinitions(DuckLakeTransaction &transaction,
+	                                                        DuckLakeLoadedBranch &loaded, idx_t new_seq,
+	                                                        const std::function<idx_t()> &next_object_id);
+	//! Removes a branch's catalog changes from the transaction again
+	static void ClearDefinitions(DuckLakeTransaction &transaction);
+	//! Throw for the catalog changes a branch does not support
+	static void CheckCreate(DuckLakeTransaction &transaction, CatalogEntry &entry);
+	static void CheckDrop(DuckLakeTransaction &transaction, CatalogEntry &entry);
+	static void CheckAlter(DuckLakeTransaction &transaction, CatalogEntry &entry, optional_ptr<CatalogEntry> new_entry);
+	//! Loads the branch before the transaction's own catalog changes are read
+	static void EnsureLoaded(DuckLakeTransaction &transaction);
+	//! The conflicts between a merge's catalog changes and main's that DuckLake's own rules let through
+	static void CheckMergeDefinitions(DuckLakeTransaction &transaction, const string &branch_name,
+	                                  DuckLakeSnapshot fork_snapshot, const SnapshotChangeInformation &other_changes);
+	//! One of main's tables or views at a snapshot
+	static optional_ptr<CatalogEntry> GetMainEntry(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
+	                                               TableIndex id, CatalogType type);
+	//===--------------------------------------------------------------------===//
 	// Row-by-row merge (ducklake_branch_row_merge.cpp)
 	//===--------------------------------------------------------------------===//
 	//! Main's changes in the snapshots after the given one
@@ -251,7 +325,7 @@ public:
 	                                                                 const DuckLakeLoadedBranch &loaded,
 	                                                                 DuckLakeSnapshot fork_snapshot,
 	                                                                 const SnapshotChangeInformation &main_changes);
-	//! The ids among the given tables (or views), at least one, that main renamed since the fork
+	//! The ids among the given tables (or views) that main renamed since the fork
 	static set<TableIndex> RenamedOnMain(DuckLakeTransaction &transaction, bool views, const set<TableIndex> &ids,
 	                                     idx_t fork_snapshot_id);
 	//! Why main's changes to a table since the fork keep it out of the row-by-row merge, if they do
@@ -267,6 +341,9 @@ public:
 	static void ExcludeFromInsertDeleteRules(TableIndex table_id, TransactionChangeInformation &changes);
 	//! Fails the merge when main changed a table merged row by row after the merge was planned
 	static void CheckRowMergeTablesUnchanged(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge);
+
+	//! A summary of the transaction's catalog changes, for ChangesFingerprint
+	static string CatalogChangesFingerprint(DuckLakeTransaction &transaction);
 
 private:
 	static void RebaseMainDeletes(DuckLakeTransaction &transaction, DuckLakeBranchMerge &merge);
