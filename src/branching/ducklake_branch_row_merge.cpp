@@ -162,27 +162,40 @@ bool SameRow(const RowCopy &a, const RowCopy &b) {
 	return true;
 }
 
-//! Reads the given rows of one side; "located" reads also return each row's file and position
-void ReadRows(Connection &connection, const string &query, const set<int64_t> &row_ids, bool located,
-              map<int64_t, RowCopy> &result) {
-	static constexpr idx_t IDS_PER_QUERY = 2048;
-	vector<int64_t> ids(row_ids.begin(), row_ids.end());
-	for (idx_t start = 0; start < ids.size(); start += IDS_PER_QUERY) {
-		vector<int64_t> batch(ids.begin() + start, ids.begin() + MinValue<idx_t>(start + IDS_PER_QUERY, ids.size()));
-		auto rows = RunBranchSql(connection, query + " WHERE rowid IN (" + BranchIdList(batch) + ")");
-		auto first_value = located ? 3 : 1;
-		for (auto &row : *rows) {
-			RowCopy copy;
-			copy.present = true;
-			if (located) {
-				copy.file = row.GetValue<string>(1);
-				copy.position = row.GetValue<idx_t>(2);
-			}
-			for (idx_t column = first_value; column < rows->ColumnCount(); column++) {
-				copy.values.push_back(row.GetBaseValue(column));
-			}
-			result[row.GetValue<int64_t>(0)] = std::move(copy);
+//! Puts the given row ids in the connection's temp table merge_row_ids, so that each side is read with one join
+void LoadRowIds(Connection &connection, const set<int64_t> &row_ids) {
+	RunBranchSql(connection, "CREATE OR REPLACE TEMP TABLE merge_row_ids (id BIGINT)");
+	vector<Value> ids;
+	ids.reserve(row_ids.size());
+	for (auto &row_id : row_ids) {
+		ids.push_back(Value::BIGINT(row_id));
+	}
+	auto statement = connection.Prepare("INSERT INTO temp.main.merge_row_ids SELECT UNNEST($1::BIGINT[])");
+	if (statement->HasError()) {
+		statement->GetErrorObject().Throw();
+	}
+	vector<Value> parameters {Value::LIST(LogicalType::BIGINT, std::move(ids))};
+	auto result = statement->Execute(parameters);
+	if (result->HasError()) {
+		result->GetErrorObject().Throw();
+	}
+}
+
+//! Reads one side's copies of the rows in merge_row_ids; "located" reads also return each row's file and position
+void ReadRows(Connection &connection, const string &query, bool located, map<int64_t, RowCopy> &result) {
+	auto rows = RunBranchSql(connection, query + " WHERE rowid IN (SELECT id FROM temp.main.merge_row_ids)");
+	auto first_value = located ? 3 : 1;
+	for (auto &row : *rows) {
+		RowCopy copy;
+		copy.present = true;
+		if (located) {
+			copy.file = row.GetValue<string>(1);
+			copy.position = row.GetValue<idx_t>(2);
 		}
+		for (idx_t column = first_value; column < rows->ColumnCount(); column++) {
+			copy.values.push_back(row.GetBaseValue(column));
+		}
+		result[row.GetValue<int64_t>(0)] = std::move(copy);
 	}
 }
 
@@ -233,16 +246,17 @@ void DuckLakeBranchManager::PlanRowMerge(ClientContext &context, const string &c
 		return;
 	}
 	// the rows both touched, as they were at the fork and as each side has them now
+	LoadRowIds(*main_connection, table.overlap);
+	LoadRowIds(*branch_connection, table.overlap);
 	map<int64_t, RowCopy> at_fork, on_branch, on_main;
 	ReadRows(*main_connection,
-	         StringUtil::Format("SELECT rowid, * FROM %s AT (VERSION => %d)", main_table, fork_snapshot_id),
-	         table.overlap, false, at_fork);
-	ReadRows(*branch_connection, "SELECT rowid, filename, file_row_number, * FROM " + branch_table, table.overlap, true,
-	         on_branch);
+	         StringUtil::Format("SELECT rowid, * FROM %s AT (VERSION => %d)", main_table, fork_snapshot_id), false,
+	         at_fork);
+	ReadRows(*branch_connection, "SELECT rowid, filename, file_row_number, * FROM " + branch_table, true, on_branch);
 	ReadRows(*main_connection,
 	         StringUtil::Format("SELECT rowid, filename, file_row_number, * FROM %s AT (VERSION => %d)", main_table,
 	                            head_snapshot_id),
-	         table.overlap, true, on_main);
+	         true, on_main);
 	for (auto &row_id : table.overlap) {
 		auto &fork = at_fork[row_id];
 		auto &branch = on_branch[row_id];
