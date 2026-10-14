@@ -86,6 +86,26 @@ bool DuckLakeBranchManager::HasColumnChangeTable(DuckLakeTransaction &transactio
 
 namespace {
 
+//! A schema the transaction created; DuckLake indexes these by name only
+optional_ptr<DuckLakeSchemaEntry> LocalSchemaById(DuckLakeTransaction &transaction, SchemaIndex schema_id) {
+	auto &state = DuckLakeBranchManager::GetTransactionState(transaction);
+	if (!state.new_schemas) {
+		return nullptr;
+	}
+	for (auto &entry : state.new_schemas->GetEntries()) {
+		auto &schema = entry.second->Cast<DuckLakeSchemaEntry>();
+		if (schema.GetSchemaId() == schema_id) {
+			return &schema;
+		}
+	}
+	return nullptr;
+}
+
+//! Alter info naming an entry of the schema, for DuckLake's own Alter functions
+AlterEntryData AlterData(SchemaCatalogEntry &schema, const string &name) {
+	return AlterEntryData(schema.ParentCatalog().GetName(), schema.name, name, OnEntryNotFound::THROW_EXCEPTION);
+}
+
 string Literal(const string &value) {
 	return DuckLakeUtil::SQLLiteralToString(value);
 }
@@ -175,7 +195,7 @@ DuckLakeBranchObjectRows EncodeTable(DuckLakeTransaction &transaction, DuckLakeL
 	}
 	rows.object_row = StringUtil::Format(
 	    "%d, 'table', %d, %s, %s, %s, %s, NULL, NULL, %s, %d", object_id, StoredSchemaId(loaded, schema, allocate),
-	    Literal(table.name.GetIdentifierName()), Literal(table.GetTableUUID()), Literal(path.path),
+	    Literal(table.name), Literal(table.GetTableUUID()), Literal(path.path),
 	    path.path_is_relative ? "true" : "false", ValueLiteral(table.comment), max_column_id + 1);
 	return rows;
 }
@@ -185,10 +205,10 @@ DuckLakeBranchObjectRows EncodeView(DuckLakeLoadedBranch &loaded, DuckLakeViewEn
 	auto &schema = view.ParentSchema().Cast<DuckLakeSchemaEntry>();
 	DuckLakeBranchObjectRows rows;
 	rows.object_type = VIEW_OBJECT;
-	rows.object_row = StringUtil::Format(
-	    "%d, 'view', %d, %s, %s, NULL, NULL, %s, %s, %s, NULL", object_id, StoredSchemaId(loaded, schema, allocate),
-	    Literal(view.name.GetIdentifierName()), Literal(view.GetViewUUID()), Literal(view.GetQuerySQL()),
-	    Literal(DuckLakeUtil::ToQuotedList(IdentifiersToStrings(view.aliases))), ValueLiteral(view.comment));
+	rows.object_row = StringUtil::Format("%d, 'view', %d, %s, %s, NULL, NULL, %s, %s, %s, NULL", object_id,
+	                                     StoredSchemaId(loaded, schema, allocate), Literal(view.name),
+	                                     Literal(view.GetViewUUID()), Literal(view.GetQuerySQL()),
+	                                     Literal(DuckLakeUtil::ToQuotedList(view.aliases)), ValueLiteral(view.comment));
 	return rows;
 }
 
@@ -202,23 +222,15 @@ map<idx_t, DuckLakeBranchObjectRows> EncodeObjects(DuckLakeTransaction &transact
 		for (auto &entry : state.new_schemas->GetEntries()) {
 			schemas.push_back(entry.second->Cast<DuckLakeSchemaEntry>());
 		}
-		// parents first, so that they get their ids first
-		std::stable_sort(schemas.begin(), schemas.end(),
-		                 [](const reference<DuckLakeSchemaEntry> &a, const reference<DuckLakeSchemaEntry> &b) {
-			                 return a.get().SchemaDepth() < b.get().SchemaDepth();
-		                 });
 		for (auto &schema_ref : schemas) {
 			auto &schema = schema_ref.get();
 			auto object_id = ObjectId(loaded, schema.GetSchemaId().index, allocate);
-			auto parent = schema.ParentDuckLakeSchema();
 			auto path = transaction.GetMetadataManager().GetRelativePath(schema.DataPath());
 			DuckLakeBranchObjectRows rows;
 			rows.object_type = SCHEMA_OBJECT;
-			rows.object_row =
-			    StringUtil::Format("%d, 'schema', %s, %s, %s, %s, %s, NULL, NULL, NULL, NULL", object_id,
-			                       parent ? to_string(StoredSchemaId(loaded, *parent, allocate)) : string("NULL"),
-			                       Literal(schema.name.GetIdentifierName()), Literal(schema.GetSchemaUUID()),
-			                       Literal(path.path), path.path_is_relative ? "true" : "false");
+			rows.object_row = StringUtil::Format("%d, 'schema', NULL, %s, %s, %s, %s, NULL, NULL, NULL, NULL",
+			                                     object_id, Literal(schema.name), Literal(schema.GetSchemaUUID()),
+			                                     Literal(path.path), path.path_is_relative ? "true" : "false");
 			result.emplace(object_id, std::move(rows));
 		}
 	}
@@ -354,9 +366,9 @@ map<string, string> EncodeMainChanges(DuckLakeTransaction &transaction, DuckLake
 				continue;
 			}
 			// a main table or view whose name differs from the fork was renamed; other changes are column changes
-			auto &new_name = catalog_entry.name.GetIdentifierName();
+			auto &new_name = catalog_entry.name;
 			auto fork_entry = MainEntryById(fork_set, id, catalog_entry.type);
-			if (fork_entry && fork_entry->name.GetIdentifierName() == new_name) {
+			if (fork_entry && fork_entry->name == new_name) {
 				// renamed back to its name at the fork
 				continue;
 			}
@@ -413,7 +425,7 @@ unique_ptr<DuckLakeFieldId> ColumnFieldId(const DuckLakeColumnInfo &col) {
 		auto col_type = DuckLakeTypes::FromString(col.type);
 		col_data.initial_default = col.initial_default.DefaultCastAs(col_type);
 		if (col.default_value.IsNull()) {
-			col_data.default_value = ConstantExpression::Null();
+			col_data.default_value = make_uniq<ConstantExpression>(Value());
 		} else if (col.default_value_type == "expression") {
 			auto expressions = Parser::ParseExpressionList(col.default_value.GetValue<string>());
 			if (expressions.size() != 1) {
@@ -421,7 +433,7 @@ unique_ptr<DuckLakeFieldId> ColumnFieldId(const DuckLakeColumnInfo &col) {
 			}
 			col_data.default_value = std::move(expressions[0]);
 		} else {
-			col_data.default_value = ConstantExpression::FromValue(col.default_value);
+			col_data.default_value = make_uniq<ConstantExpression>(col.default_value);
 		}
 		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(col_type));
 	}
@@ -656,7 +668,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		if (local_id == loaded.local_ids.end()) {
 			return nullptr;
 		}
-		return &transaction.GetLocalEntryById(SchemaIndex(local_id->second))->Cast<DuckLakeSchemaEntry>();
+		return LocalSchemaById(transaction, SchemaIndex(local_id->second));
 	};
 	auto add_local_id = [&](idx_t object_id, idx_t local_id) {
 		loaded.local_ids[object_id] = local_id;
@@ -679,38 +691,22 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		}
 	}
 
-	// the schemas the branch created, parents first
-	vector<reference<StoredObject>> pending;
+	// the schemas the branch created; this DuckLake version has no nested schemas
 	for (auto &object : objects) {
-		if (object.object_type == SCHEMA_OBJECT) {
-			pending.push_back(object);
+		if (object.object_type != SCHEMA_OBJECT) {
+			continue;
 		}
-	}
-	while (!pending.empty()) {
-		vector<reference<StoredObject>> waiting;
-		for (auto &object_ref : pending) {
-			auto &object = object_ref.get();
-			optional_ptr<DuckLakeSchemaEntry> parent;
-			if (object.parent_id.IsValid()) {
-				parent = schema_for(object.parent_id.GetIndex());
-				if (!parent) {
-					waiting.push_back(object);
-					continue;
-				}
-			}
-			CreateSchemaInfo schema_info;
-			schema_info.SetQualifiedName(QualifiedName(schema_info.GetQualifiedName().Catalog(),
-			                                           Identifier(object.name), schema_info.GetQualifiedName().Name()));
-			SchemaIndex local_id(transaction.GetLocalCatalogId());
-			auto path = LoadBranchPath(catalog, catalog.DataPath(), object.path, object.path_is_relative);
-			transaction.CreateEntry(
-			    make_uniq<DuckLakeSchemaEntry>(catalog, schema_info, local_id, object.uuid, std::move(path), parent));
-			add_local_id(object.object_id, local_id.index);
+		if (object.parent_id.IsValid()) {
+			throw InvalidInputException("Branch \"%s\" has a nested schema, which this DuckLake version does not have",
+			                            branch.name);
 		}
-		if (waiting.size() == pending.size()) {
-			throw InvalidInputException("Branch \"%s\" has a schema whose parent schema is missing", branch.name);
-		}
-		pending = std::move(waiting);
+		CreateSchemaInfo schema_info;
+		schema_info.schema = object.name;
+		SchemaIndex local_id(transaction.GetLocalCatalogId());
+		auto path = LoadBranchPath(catalog, catalog.DataPath(), object.path, object.path_is_relative);
+		transaction.CreateEntry(
+		    make_uniq<DuckLakeSchemaEntry>(catalog, schema_info, local_id, object.uuid, std::move(path)));
+		add_local_id(object.object_id, local_id.index);
 	}
 
 	// main's tables and views the branch renamed, through DuckLake's own ALTER
@@ -720,7 +716,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		}
 		auto &entry = main_entry(change.object_type, change.main_id);
 		auto &schema = entry.ParentSchema().Cast<DuckLakeSchemaEntry>();
-		AlterEntryData alter_data(schema.GetQualifiedName(entry.name), OnEntryNotFound::THROW_EXCEPTION);
+		auto alter_data = AlterData(schema, entry.name);
 		if (entry.type == CatalogType::TABLE_ENTRY) {
 			auto &table = entry.Cast<DuckLakeTableEntry>();
 			RenameTableInfo info(alter_data, Identifier(change.new_name));
@@ -753,10 +749,9 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 				if (!field) {
 					throw InvalidInputException(
 					    "Branch \"%s\" dropped column %d of table \"%s\", which it does not have", branch.name,
-					    column.column_id, table.name.GetIdentifierName());
+					    column.column_id, table.name);
 				}
-				AlterEntryData alter_data(table.ParentSchema().GetQualifiedName(table.name),
-				                          OnEntryNotFound::THROW_EXCEPTION);
+				auto alter_data = AlterData(table.ParentSchema(), table.name);
 				RemoveColumnInfo info(alter_data, field->Name(), false, false);
 				new_entry = table.Alter(context, transaction, info);
 			}
@@ -778,12 +773,12 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 				throw InvalidInputException("Branch \"%s\" has %s \"%s\" without a schema", branch.name,
 				                            object.object_type, object.name);
 			}
-			Identifier schema_name(schema->name.GetIdentifierName());
+			Identifier schema_name(schema->name);
 			TableIndex local_id(transaction.GetLocalCatalogId());
 			Identifier object_name(object.name);
 			if (object_type == VIEW_OBJECT) {
 				auto view_info = make_uniq<CreateViewInfo>(*schema, object_name);
-				view_info->aliases = StringsToIdentifiers(DuckLakeUtil::ParseQuotedList(object.view_aliases));
+				view_info->aliases = DuckLakeUtil::ParseQuotedList(object.view_aliases);
 				auto view_entry = make_uniq<DuckLakeViewEntry>(catalog, *schema, *view_info, local_id, object.uuid,
 				                                               object.view_sql, LocalChangeType::CREATED);
 				auto &view = *view_entry;
@@ -860,8 +855,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 				latest = next;
 			};
 			for (auto &dropped_name : dropped_names) {
-				AlterEntryData alter_data(schema->GetQualifiedName(Identifier(object.name)),
-				                          OnEntryNotFound::THROW_EXCEPTION);
+				auto alter_data = AlterData(*schema, object.name);
 				RemoveColumnInfo info(alter_data, dropped_name, false, false);
 				apply(latest.get().Alter(context, transaction, info));
 			}
@@ -963,12 +957,12 @@ unique_ptr<CatalogEntry> DuckLakeBranchManager::AddColumnWithIds(ClientContext &
 	auto create_info = table.GetInfo();
 	auto copy = make_uniq<DuckLakeTableEntry>(table, create_info->Cast<CreateTableInfo>(), LocalChangeType::NONE);
 	copy->next_column_id = column.id.index;
-	AlterEntryData alter_data(table.ParentSchema().GetQualifiedName(table.name), OnEntryNotFound::THROW_EXCEPTION);
-	AddColumnInfo info(alter_data, std::move(definition), false, AddColumnConstraints());
+	auto alter_data = AlterData(table.ParentSchema(), table.name);
+	AddColumnInfo info(alter_data, std::move(definition), false);
 	auto result = copy->Alter(context, transaction, info);
 	if (!SameColumnIds(result->Cast<DuckLakeTableEntry>().GetAddColumnInfo(), column)) {
 		throw InvalidInputException("Column \"%s\" a branch added to table \"%s\" has inconsistent column ids",
-		                            column.name, table.name.GetIdentifierName());
+		                            column.name, table.name);
 	}
 	return result;
 }
@@ -1189,9 +1183,6 @@ void DuckLakeBranchManager::CheckCreate(DuckLakeTransaction &transaction, Catalo
 		if (table.GetSortData()) {
 			EnsureNotOnBranch(transaction, "CREATE TABLE ... SORTED BY");
 		}
-		if (!table.GetTableOptions().empty()) {
-			EnsureNotOnBranch(transaction, "CREATE TABLE ... WITH options");
-		}
 		return;
 	}
 	default:
@@ -1304,8 +1295,7 @@ void DuckLakeBranchManager::CheckColumnChanges(DuckLakeTransaction &transaction,
 			auto entry = MainEntryById(fork_set, id, CatalogType::TABLE_ENTRY);
 			throw TransactionException("Transaction conflict - branch \"%s\" changed the columns of table \"%s\", but "
 			                           "main %s it since the fork",
-			                           branch_name, entry ? entry->name.GetIdentifierName() : to_string(id.index),
-			                           main_action);
+			                           branch_name, entry ? entry->name : to_string(id.index), main_action);
 		}
 	}
 }
@@ -1328,8 +1318,8 @@ void DuckLakeBranchManager::CheckMergeDefinitions(DuckLakeTransaction &transacti
 		                           StringUtil::Equals(object_type, "table") ? CatalogType::TABLE_ENTRY
 		                                                                    : CatalogType::VIEW_ENTRY);
 		throw TransactionException("Transaction conflict - branch \"%s\" %s %s \"%s\", but main %s it since the fork",
-		                           branch_name, branch_action, object_type,
-		                           entry ? entry->name.GetIdentifierName() : to_string(id.index), main_action);
+		                           branch_name, branch_action, object_type, entry ? entry->name : to_string(id.index),
+		                           main_action);
 	};
 	auto contains = [](const set<TableIndex> &tables, TableIndex id) {
 		return tables.find(id) != tables.end();

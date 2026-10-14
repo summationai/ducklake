@@ -8,6 +8,7 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -52,6 +53,26 @@ vector<DuckLakeBranchInfo> DuckLakeBranchManager::GetBranchesWithActivity(DuckLa
 //===--------------------------------------------------------------------===//
 namespace {
 
+//! The extension settings the caller set, on the internal connection
+void CopyExtensionSettings(ClientContext &from, ClientContext &to) {
+	auto &db_config = DBConfig::GetConfig(from);
+	for (auto &entry : db_config.GetExtensionSettings()) {
+		auto &option = entry.second;
+		if (!option.setting_index.IsValid()) {
+			continue;
+		}
+		auto setting_index = option.setting_index.GetIndex();
+		if (!from.config.user_settings.IsSet(setting_index)) {
+			continue;
+		}
+		Value value;
+		if (!from.TryGetCurrentSetting(entry.first, value)) {
+			continue;
+		}
+		to.config.user_settings.SetUserSetting(setting_index, value);
+	}
+}
+
 string SqlLiteral(const string &value) {
 	return DuckLakeUtil::SQLLiteralToString(value);
 }
@@ -77,9 +98,8 @@ string UniqueArchiveName(ClientContext &context, const string &catalog_name, con
 		if (reserved_names.find(name) != reserved_names.end()) {
 			continue;
 		}
-		QualifiedName qualified {Identifier(catalog_name), Identifier(schema_name), Identifier(name)};
-		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified);
-		if (Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL)) {
+		if (Catalog::GetEntry(context, catalog_name, schema_name, EntryLookupInfo(CatalogType::TABLE_ENTRY, name),
+		                      OnEntryNotFound::RETURN_NULL)) {
 			continue;
 		}
 		reserved_names.insert(name);
@@ -114,7 +134,7 @@ vector<ArchiveSource> ArchiveSources(DuckLakeTransaction &transaction, const Duc
 void ArchiveAndClose(Connection &connection, DuckLakeCatalog &catalog, const string &archive_schema, date_t close_date,
                      bool dry_run, case_insensitive_set_t &reserved_names, DuckLakeStaleBranch &branch) {
 	auto &context = *connection.context;
-	auto catalog_name = catalog.GetName().GetIdentifierName();
+	auto catalog_name = catalog.GetName();
 	auto &info = branch.info;
 	vector<ArchiveSource> sources;
 	auto archive_name = [&](const ArchiveSource &source) {
@@ -183,7 +203,7 @@ vector<DuckLakeStaleBranch> DuckLakeBranchManager::CloseStaleBranches(ClientCont
                                                                       const string &archive_schema, bool dry_run) {
 	// each branch is archived and closed in a main transaction of its own, on a connection of its own
 	Connection connection(*context.db);
-	DuckLakeUtil::CopyExtensionSettings(context, *connection.context);
+	CopyExtensionSettings(context, *connection.context);
 	vector<DuckLakeStaleBranch> result;
 	connection.context->RunFunctionInTransaction([&]() {
 		auto &transaction = DuckLakeTransaction::Get(*connection.context, catalog);
@@ -291,7 +311,7 @@ void DuckLakeBranchManager::CommitClose(DuckLakeTransaction &transaction) {
 		metadata_connection.Rollback();
 		throw;
 	}
-	auto result = transaction.GetMetadataManager().Execute(CloseBookkeepingSql(transaction, close, false));
+	auto result = transaction.Query(CloseBookkeepingSql(transaction, close, false));
 	if (result->HasError()) {
 		metadata_connection.Rollback();
 		result->GetErrorObject().Throw(StringUtil::Format("Failed to close branch \"%s\" - retry: ", close.info.name));

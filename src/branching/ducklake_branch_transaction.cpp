@@ -1,4 +1,5 @@
 #include "branching/ducklake_branch.hpp"
+#include "branching/ducklake_branch_util.hpp"
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
@@ -199,9 +200,9 @@ void DuckLakeBranchManager::CommitToBranch(DuckLakeTransaction &transaction) {
 
 string DuckLakeBranchManager::ChangesFingerprint(DuckLakeTransaction &transaction) {
 	auto &state = GetTransactionState(transaction);
-	auto result = StringUtil::Format("%d/%d/%d/%d/%d/%d", state.SchemaChangesMade(), state.dropped_files.size(),
+	auto result = StringUtil::Format("%d/%d/%d/%d/%d", state.SchemaChangesMade(), state.dropped_files.size(),
 	                                 state.flushed_inlined_tables.size(), transaction.new_name_maps.name_maps.size(),
-	                                 state.tables_deleted_from.size(), state.tables_delete_attempted.size());
+	                                 state.tables_deleted_from.size());
 	result += "/" + CatalogChangesFingerprint(transaction);
 	for (auto &entry : state.local_changes.Changes()) {
 		auto &changes = entry.GetTableChanges();
@@ -247,7 +248,7 @@ void DuckLakeBranchManager::CommitMerge(DuckLakeTransaction &transaction) {
 	}
 	// the branch changed nothing - only record that it was merged
 	auto &metadata_connection = transaction.GetConnection();
-	auto result = transaction.GetMetadataManager().Execute(MergeBookkeepingSql(transaction, merge, false));
+	auto result = transaction.Query(MergeBookkeepingSql(transaction, merge, false));
 	if (result->HasError()) {
 		metadata_connection.Rollback();
 		result->GetErrorObject().Throw(
@@ -355,10 +356,10 @@ void DuckLakeBranchManager::FlushBranchDelete(const DuckLakeDelete &op, DuckLake
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
 	auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
-	bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table_id, &table.GetTableOptions());
+	bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table_id);
 	WriteDeleteFileInput input {context,           transaction, fs,      table.DataPath(),
 	                            op.encryption_key, filename,    deletes, DeleteFileSource::REGULAR};
-	auto written_file = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
+	auto written_file = WriteBranchDeleteFile(context, input, use_deletion_vectors);
 	written_file.data_file_id = delete_file.data_file_id;
 	written_file.overwrites_existing_delete = delete_file.overwrites_existing_delete;
 	written_files.emplace(filename, std::move(written_file));
