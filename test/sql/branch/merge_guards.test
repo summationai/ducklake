@@ -1,0 +1,140 @@
+# name: test/sql/branch/merge_guards.test
+# description: a merge is the only change of its transaction, and fails cleanly when its branch changes during it
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_guards_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# one statement at a time, run in order: the left side of a UNION ALL first
+statement ok
+SET threads = 1
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(10)
+
+statement ok
+CREATE TABLE r(branch_name VARCHAR, fork_snapshot_id UBIGINT, branch_commits UBIGINT)
+
+statement ok
+CREATE TABLE ri(branch_name VARCHAR, fork_snapshot_id UBIGINT, branch_commits UBIGINT)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, table_name => 'ri')
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+CREATE BRANCH c
+
+statement ok
+CREATE BRANCH e
+
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO t VALUES (100)
+
+statement ok
+SET BRANCH c
+
+statement ok
+INSERT INTO t VALUES (200)
+
+statement ok
+SET BRANCH main
+
+# two small files main can compact
+statement ok
+INSERT INTO r VALUES ('x', 0, 0)
+
+statement ok
+INSERT INTO r VALUES ('y', 0, 0)
+
+statement ok
+SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+# one merge per statement
+statement error
+SELECT branch_name FROM ducklake_merge_branch('ducklake', 'b') UNION ALL SELECT branch_name FROM ducklake_merge_branch('ducklake', 'c')
+----
+Only one branch can be merged per transaction
+
+# a change before the merge in the same statement
+statement error
+SELECT 1 FROM ducklake_merge_adjacent_files('ducklake') UNION ALL SELECT 1 FROM ducklake_merge_branch('ducklake', 'b')
+----
+MERGE BRANCH must be the only change in its transaction
+
+# a change after the merge in the same statement, written to a file or inlined
+statement error
+INSERT INTO r SELECT * FROM ducklake_merge_branch('ducklake', 'b')
+----
+MERGE BRANCH must be the only change in its transaction
+
+statement error
+INSERT INTO ri SELECT * FROM ducklake_merge_branch('ducklake', 'b')
+----
+MERGE BRANCH must be the only change in its transaction
+
+# the branch dropped after the merge loaded it, with changes and without
+statement error
+SELECT branch_name FROM ducklake_merge_branch('ducklake', 'b') UNION ALL SELECT branch_name FROM ducklake_drop_branch('ducklake', 'b')
+----
+Branch "b" was changed or dropped during the merge
+
+statement error
+SELECT branch_name FROM ducklake_merge_branch('ducklake', 'e') UNION ALL SELECT branch_name FROM ducklake_drop_branch('ducklake', 'e')
+----
+Failed to merge branch "e"
+
+# none of it changed anything
+query I
+SELECT MAX(snapshot_id) = getvariable('head') FROM ducklake_snapshots('ducklake')
+----
+true
+
+query IIII
+SELECT (SELECT COUNT(*) FROM t), (SELECT COUNT(*) FROM r), (SELECT COUNT(*) FROM ri), (SELECT COUNT(*) FROM ducklake_branches('ducklake'))
+----
+10	2	0	3
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+0
+
+# and the branches still merge
+statement ok
+MERGE BRANCH b
+
+statement ok
+MERGE BRANCH c
+
+statement ok
+MERGE BRANCH e
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+12	345
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+0

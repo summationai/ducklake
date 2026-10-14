@@ -10,21 +10,24 @@ src/branching/ducklake_branch_parser.cpp | DuckLakeBranchParseData::Copy | Copy(
 src/branching/ducklake_branch_parser.cpp | BranchTokenReader::SkipComments | position++; | DuckDB passes parser extensions a token stream without comment tokens; kept because the COMMENT token type exists
 src/branching/ducklake_branch_parser.cpp | BranchTokenReader::AtEnd | return true; | DuckDB's token stream always ends with an end-of-input token; reading past it is defensive
 src/branching/ducklake_branch.cpp | ResolveMainFiles | references table %d whic | a data file visible at the fork belongs to a table that exists at the fork; damaged file ids fail the check after it (tested in branch_corruption)
+src/branching/ducklake_branch.cpp | LoadFileDetails | continue; | stats and partition rows of branch files not visible at the head, or of tables or columns missing at the fork; branches change no schema and never end their own data files
 src/branching/ducklake_branch_transaction.cpp | DuckLakeBranchManager::GetBranchSnapshot | return *state.loading_fork_snapshot; | re-entrant snapshot lookup while the branch loads; LoadBranch passes the fork snapshot explicitly, so nothing re-enters today
 src/branching/ducklake_branch_transaction.cpp | DuckLakeBranchManager::GetBranchSnapshot | return *transaction.snapshot; | another thread loaded the branch while this one waited for the load lock (parallel first use of one transaction)
 src/branching/ducklake_branch_transaction.cpp | ClearBranchSelection | return; | the client context is gone, and the selection belongs to it
+src/branching/ducklake_branch_transaction.cpp | DuckLakeBranchManager::ForgetDeleteFiles | return; | called only for a table whose branch delete file is in the local changes
 src/branching/ducklake_branch_transaction.cpp | DuckLakeBranchManager::IsLoadedBranchFile | return false; | called only for a transaction-local data file, which is always in the local changes of its table
 
 # races between two transactions; sqllogictest runs one statement at a time
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::CreateBranch | SetHasBranchTables(transaction, false); | a concurrent CREATE BRANCH between creating the branch tables and inserting the branch (the failing insert itself is tested in branch_corruption)
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::DropBranch | was changed or dropped by another transaction | a concurrent branch commit or DROP BRANCH between reading and dropping the branch
+src/branching/ducklake_branch.cpp | DuckLakeBranchManager::CheckMerge | was merged by another | another MERGE BRANCH of the same branch committing during this one (a DROP BRANCH during the merge is tested in merge_guards)
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::CommitBranch | throw TransactionException(changed_error); | the head moved with no write conflict raised, as on a Postgres catalog (READ COMMITTED); DuckDB and SQLite catalogs raise it earlier (tested in branch_concurrent)
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::CommitBranch | write_result->GetErrorObject().Throw | the commit batch fails after the head advanced, e.g. a concurrent write to the same rows on a Postgres catalog
+src/branching/ducklake_branch_row_merge.cpp | DuckLakeBranchManager::CheckRowMergeTablesUnchanged | Transaction conflict - main changed tab | main commits to a row-merged table between planning and committing the merge; both happen inside one MERGE BRANCH statement, which cannot run in an explicit transaction
 
 # errors of the metadata catalog itself (I/O, lost connection)
 src/branching/ducklake_branch.cpp | DuckLakeBranchManager::HasBranchTables | Failed to probe DuckLake branch tabl | the metadata catalog fails for a reason other than a missing table
 src/branching/ducklake_branching.cpp | DuckLakeBranching::IsInlinedTablePinned | Failed to check inlined data agains | the metadata catalog fails while flushing inlined data
 src/branching/ducklake_branching.cpp | DuckLakeBranching::AddKnownFiles | Failed to get branch files from Duc | the metadata catalog fails during orphan cleanup
-
-# platform
-src/branching/ducklake_branch.cpp | LoadBranchPath | StringUtil::Replace(result, "/", separator) | Windows paths; the separator is "/" on macOS and Linux
+src/branching/ducklake_branch_row_merge.cpp | DuckLakeBranchManager::MainChangesSince (lambda) | Failed to read main's changes since | the metadata catalog fails while the merge reads main's changes since the fork
+src/branching/ducklake_branch_merge_rows.cpp | RunBranchSql | result->GetErrorObject().Throw(); | an internal read of a table fails, i.e. its metadata or data files cannot be read

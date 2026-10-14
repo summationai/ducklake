@@ -18,6 +18,7 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetCreateBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetDropBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetSetBranchFunction());
+	loader.RegisterFunction(DuckLakeBranchFunctions::GetMergeBranchFunction());
 	DuckLakeCurrentBranchFunction current_branch;
 	loader.RegisterFunction(current_branch);
 	DuckLakeBranchesFunction branches;
@@ -60,11 +61,28 @@ bool DuckLakeBranching::TryGetSnapshot(DuckLakeTransaction &transaction, DuckLak
 }
 
 bool DuckLakeBranching::TryCommit(DuckLakeTransaction &transaction) {
-	if (!IsOnBranch(transaction)) {
-		return false;
+	if (IsOnBranch(transaction)) {
+		DuckLakeBranchManager::CommitToBranch(transaction);
+		return true;
 	}
-	DuckLakeBranchManager::CommitToBranch(transaction);
-	return true;
+	if (DuckLakeBranchManager::IsMergingBranch(transaction)) {
+		DuckLakeBranchManager::CommitMerge(transaction);
+		return true;
+	}
+	return false;
+}
+
+void DuckLakeBranching::PrepareCommitLoop(DuckLakeTransaction &transaction, DuckLakeCommitContext &context) {
+	auto state = DuckLakeBranchManager::GetState(transaction);
+	if (!state || !state->merge) {
+		return;
+	}
+	// a merge starts at the fork snapshot: its checks run on every attempt, its bookkeeping commits with it
+	auto &merge = *state->merge;
+	context.pre_commit_check = [&transaction, &merge](const SnapshotChangeInformation &other_changes) {
+		DuckLakeBranchManager::CheckMerge(transaction, merge, other_changes);
+	};
+	context.extra_commit_sql = DuckLakeBranchManager::MergeBookkeepingSql(transaction, merge, true);
 }
 
 void DuckLakeBranching::DeleteSnapshots(DuckLakeTransaction &transaction,
@@ -75,11 +93,11 @@ void DuckLakeBranching::DeleteSnapshots(DuckLakeTransaction &transaction,
 		metadata_manager.DeleteSnapshots(snapshots);
 		return;
 	}
-	// a branch may have forked from one of these snapshots since they were selected
-	set<idx_t> pinned(forks.begin(), forks.end());
+	// a branch may have forked since these snapshots were selected - it needs its fork and everything after it
+	auto oldest_fork = *std::min_element(forks.begin(), forks.end());
 	vector<DuckLakeSnapshotInfo> expirable;
 	for (auto &snapshot : snapshots) {
-		if (pinned.find(snapshot.id) == pinned.end()) {
+		if (snapshot.id < oldest_fork) {
 			expirable.push_back(snapshot);
 		}
 	}
@@ -145,8 +163,7 @@ string DuckLakeBranching::ExpirableSnapshotFilter(DuckLakeTransaction &transacti
 	if (!DuckLakeBranchManager::HasBranchTables(transaction)) {
 		return string();
 	}
-	// the fork snapshot of every active branch must stay readable
-	return "snapshot_id NOT IN (" + DuckLakeBranchManager::ActiveForkSnapshotsQuery() + ") AND ";
+	return DuckLakeBranchManager::ExpirableSnapshotFilter() + " AND ";
 }
 
 void DuckLakeBranching::FilterCompactionCandidates(DuckLakeTransaction &transaction, CompactionType type,
