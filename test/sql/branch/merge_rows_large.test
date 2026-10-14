@@ -1,0 +1,109 @@
+# name: test/sql/branch/merge_rows_large.test
+# description: row-by-row merges where thousands of rows were touched on both sides
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_large_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# one file per table, so each row id equals its id
+statement ok
+CREATE TABLE t_win(id INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO t_win SELECT range, range FROM range(20000)
+
+statement ok
+CREATE TABLE t_fail AS FROM t_win
+
+statement ok
+CREATE BRANCH b_win
+
+statement ok
+CREATE BRANCH b_fail
+
+# b_win: no row ends up different on both sides
+statement ok
+SET BRANCH b_win
+
+statement ok
+UPDATE t_win SET v = -id WHERE id < 10000
+
+statement ok
+UPDATE t_win SET v = id * 10 WHERE id BETWEEN 10000 AND 14999
+
+statement ok
+DELETE FROM t_win WHERE id BETWEEN 15000 AND 17499
+
+# b_fail: 5,000 rows updated on both sides, 1,000 deleted on the branch and updated on main, 1,000 the other way
+statement ok
+SET BRANCH b_fail
+
+statement ok
+UPDATE t_fail SET v = id + 1 WHERE id < 5000 OR id BETWEEN 6000 AND 6999
+
+statement ok
+DELETE FROM t_fail WHERE id BETWEEN 5000 AND 5999
+
+statement ok
+SET BRANCH main
+
+# main rewrites 0-4999 with their old values, makes the branch's change to 10000-14999, deletes 15000-17999
+statement ok
+UPDATE t_win SET v = v WHERE id < 5000
+
+statement ok
+UPDATE t_win SET v = id * 10 WHERE id BETWEEN 10000 AND 14999
+
+statement ok
+DELETE FROM t_win WHERE id BETWEEN 15000 AND 17999
+
+statement ok
+UPDATE t_fail SET v = id + 2 WHERE id < 5000
+
+statement ok
+UPDATE t_fail SET v = id + 3 WHERE id BETWEEN 5000 AND 5999
+
+statement ok
+DELETE FROM t_fail WHERE id BETWEEN 6000 AND 6999
+
+# b_win merges: the branch wins where main only rewrote, main's copy stays where both made the same change
+statement ok
+MERGE BRANCH b_win
+
+query IIIIII
+SELECT COUNT(*), COUNT(DISTINCT rowid), COUNT(*) FILTER (WHERE id < 10000 AND v = -id),
+       COUNT(*) FILTER (WHERE id BETWEEN 10000 AND 14999 AND v = id * 10), COUNT(*) FILTER (WHERE id >= 18000 AND v = id),
+       COUNT(*) FILTER (WHERE id BETWEEN 15000 AND 17999)
+FROM t_win
+----
+17000	17000	10000	5000	2000	0
+
+# b_fail: all 7,000 rows conflict, and the merge names the first ten
+statement error
+MERGE BRANCH b_fail
+----
+changed 7000 row(s) of table "t_fail" differently since the fork (rowid 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, ...)
+
+# the failed merge left b_fail and main's table as they were
+query IIII
+SELECT COUNT(*), COUNT(*) FILTER (WHERE id < 5000 AND v = id + 2), COUNT(*) FILTER (WHERE id BETWEEN 5000 AND 5999 AND v = id + 3),
+       COUNT(*) FILTER (WHERE id BETWEEN 6000 AND 6999)
+FROM t_fail
+----
+19000	5000	1000	0
+
+query T
+SELECT branch_name FROM ducklake_branches('ducklake')
+----
+b_fail
