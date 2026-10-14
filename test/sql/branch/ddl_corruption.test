@@ -23,6 +23,9 @@ statement ok
 INSERT INTO t VALUES (1)
 
 statement ok
+CREATE TABLE wide(i INTEGER, j INTEGER)
+
+statement ok
 CREATE BRANCH healthy
 
 statement ok
@@ -215,6 +218,84 @@ SET BRANCH main
 statement ok
 SET VARIABLE files_of_missing_table = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'files_of_missing_table')
 
+statement ok
+CREATE BRANCH unknown_column_change
+
+statement ok
+SET BRANCH unknown_column_change
+
+statement ok
+ALTER TABLE t ADD COLUMN c INTEGER
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE unknown_column_change = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'unknown_column_change')
+
+statement ok
+CREATE BRANCH dropped_missing_column
+
+statement ok
+SET BRANCH dropped_missing_column
+
+statement ok
+ALTER TABLE wide DROP COLUMN j
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE dropped_missing_column = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'dropped_missing_column')
+
+statement ok
+CREATE BRANCH column_change_roots
+
+statement ok
+SET BRANCH column_change_roots
+
+statement ok
+ALTER TABLE t ADD COLUMN s STRUCT(p INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE column_change_roots = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'column_change_roots')
+
+statement ok
+CREATE BRANCH column_ids_moved
+
+statement ok
+SET BRANCH column_ids_moved
+
+statement ok
+ALTER TABLE t ADD COLUMN s STRUCT(p INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE column_ids_moved = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'column_ids_moved')
+
+statement ok
+CREATE BRANCH added_to_own_table
+
+statement ok
+SET BRANCH added_to_own_table
+
+statement ok
+CREATE TABLE own(i INTEGER, j INTEGER)
+
+statement ok
+ALTER TABLE own DROP COLUMN j
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE added_to_own_table = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'added_to_own_table')
+
 # the metadata is edited in statements of its own, as it would be by hand
 statement ok
 UPDATE ducklake_meta.ducklake_branching_main_change SET change_type = 'shrunk' WHERE branch_id = getvariable('unknown_change')
@@ -380,6 +461,76 @@ statement error
 SELECT COUNT(*) FROM t
 ----
 Branch "files_of_missing_table" has files of table
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column_change SET change_type = 'widened' WHERE branch_id = getvariable('unknown_column_change')
+
+statement ok
+SET BRANCH unknown_column_change
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "unknown_column_change" has an unknown column change "widened"
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column_change SET column_id = 999 WHERE branch_id = getvariable('dropped_missing_column')
+
+statement ok
+SET BRANCH dropped_missing_column
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "dropped_missing_column" dropped column 999 of table "wide", which it does not have
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column_change SET parent_column = NULL WHERE branch_id = getvariable('column_change_roots')
+
+statement ok
+SET BRANCH column_change_roots
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "column_change_roots" has a column change of 2 columns
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column_change SET column_id = column_id + CASE WHEN parent_column IS NULL THEN 100 ELSE 200 END, parent_column = parent_column + 100 WHERE branch_id = getvariable('column_ids_moved')
+
+statement ok
+SET BRANCH column_ids_moved
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Column "s" a branch added to table "t" has inconsistent column ids
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_column_change SET change_type = 'added' WHERE branch_id = getvariable('added_to_own_table')
+
+statement ok
+SET BRANCH added_to_own_table
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "added_to_own_table" has an added column of table "own" it created
 
 statement ok
 SET BRANCH main

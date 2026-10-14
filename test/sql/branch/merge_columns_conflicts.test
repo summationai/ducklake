@@ -1,0 +1,331 @@
+# name: test/sql/branch/merge_columns_conflicts.test
+# description: a branch's column change merges only if main left the table's catalog alone; otherwise it is reported
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_columns_conflicts_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE added(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO added VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE dropped(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO dropped VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE renamed_col(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO renamed_col VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE commented(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO commented VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE table_dropped(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO table_dropped VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE table_renamed(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO table_renamed VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE twice(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO twice VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE TABLE rows(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO rows VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+CREATE BRANCH b_added
+
+statement ok
+CREATE BRANCH b_dropped
+
+statement ok
+CREATE BRANCH b_renamed_col
+
+statement ok
+CREATE BRANCH b_commented
+
+statement ok
+CREATE BRANCH b_table_dropped
+
+statement ok
+CREATE BRANCH b_table_renamed
+
+statement ok
+CREATE BRANCH b_first
+
+statement ok
+CREATE BRANCH b_second
+
+statement ok
+CREATE BRANCH b_rows
+
+statement ok
+SET BRANCH b_added
+
+statement ok
+ALTER TABLE added ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+SET BRANCH b_dropped
+
+statement ok
+ALTER TABLE dropped ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+SET BRANCH b_renamed_col
+
+statement ok
+ALTER TABLE renamed_col ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+SET BRANCH b_commented
+
+statement ok
+ALTER TABLE commented ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+SET BRANCH b_table_dropped
+
+statement ok
+ALTER TABLE table_dropped ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+SET BRANCH b_table_renamed
+
+statement ok
+ALTER TABLE table_renamed ADD COLUMN c INTEGER DEFAULT 5
+
+statement ok
+SET BRANCH b_first
+
+statement ok
+ALTER TABLE twice ADD COLUMN c INTEGER
+
+statement ok
+SET BRANCH b_second
+
+statement ok
+ALTER TABLE twice ADD COLUMN d VARCHAR
+
+# the branch adds a column and fills it; main changes other rows, and one row the branch filled too
+statement ok
+SET BRANCH b_rows
+
+statement ok
+ALTER TABLE rows ADD COLUMN c INTEGER DEFAULT 0
+
+statement ok
+UPDATE rows SET c = a * 100
+
+statement ok
+ALTER TABLE rows DROP COLUMN b
+
+statement ok
+SET BRANCH main
+
+# main's changes to the same tables since the fork
+statement ok
+ALTER TABLE added ADD COLUMN m INTEGER
+
+statement ok
+ALTER TABLE dropped DROP COLUMN b
+
+statement ok
+ALTER TABLE renamed_col RENAME COLUMN b TO bb
+
+statement ok
+COMMENT ON TABLE commented IS 'changed on main'
+
+statement ok
+DROP TABLE table_dropped
+
+statement ok
+ALTER TABLE table_renamed RENAME TO table_renamed_main
+
+statement ok
+INSERT INTO rows VALUES (4, 40)
+
+statement ok
+DELETE FROM rows WHERE a = 1
+
+statement ok
+UPDATE rows SET b = 222 WHERE a = 2
+
+statement ok
+SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+# each is reported by name, in the dry run and by the merge
+query TT
+SELECT status, conflict FROM ducklake_merge_branch('ducklake', 'b_added', dry_run => true) WHERE table_name = 'added'
+----
+conflict	Transaction conflict - branch "b_added" changed the columns of table "added", but main altered it since the fork
+
+statement error
+MERGE BRANCH b_added
+----
+branch "b_added" changed the columns of table "added", but main altered it since the fork
+
+query TT
+SELECT status, conflict FROM ducklake_merge_branch('ducklake', 'b_dropped', dry_run => true) WHERE table_name = 'dropped'
+----
+conflict	Transaction conflict - branch "b_dropped" changed the columns of table "dropped", but main altered it since the fork
+
+statement error
+MERGE BRANCH b_dropped
+----
+branch "b_dropped" changed the columns of table "dropped", but main altered it since the fork
+
+query TT
+SELECT status, conflict FROM ducklake_merge_branch('ducklake', 'b_renamed_col', dry_run => true) WHERE table_name = 'renamed_col'
+----
+conflict	Transaction conflict - branch "b_renamed_col" changed the columns of table "renamed_col", but main altered it since the fork
+
+statement error
+MERGE BRANCH b_renamed_col
+----
+branch "b_renamed_col" changed the columns of table "renamed_col", but main altered it since the fork
+
+query TT
+SELECT status, conflict FROM ducklake_merge_branch('ducklake', 'b_commented', dry_run => true) WHERE table_name = 'commented'
+----
+conflict	Transaction conflict - branch "b_commented" changed the columns of table "commented", but main altered it since the fork
+
+statement error
+MERGE BRANCH b_commented
+----
+branch "b_commented" changed the columns of table "commented", but main altered it since the fork
+
+query TT
+SELECT status, conflict FROM ducklake_merge_branch('ducklake', 'b_table_dropped', dry_run => true) WHERE table_name = 'table_dropped'
+----
+conflict	Transaction conflict - branch "b_table_dropped" changed the columns of table "table_dropped", but main dropped it since the fork
+
+statement error
+MERGE BRANCH b_table_dropped
+----
+branch "b_table_dropped" changed the columns of table "table_dropped", but main dropped it since the fork
+
+query TT
+SELECT status, conflict FROM ducklake_merge_branch('ducklake', 'b_table_renamed', dry_run => true) WHERE table_name = 'table_renamed'
+----
+conflict	Transaction conflict - branch "b_table_renamed" changed the columns of table "table_renamed", but main renamed it since the fork
+
+statement error
+MERGE BRANCH b_table_renamed
+----
+branch "b_table_renamed" changed the columns of table "table_renamed", but main renamed it since the fork
+
+# on_conflict resolves rows, not a column change
+statement error
+MERGE BRANCH b_added ON CONFLICT KEEP BRANCH
+----
+changed the columns of table "added", but main altered it
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'b_added', on_conflict => 'main')
+----
+changed the columns of table "added", but main altered it
+
+# two branches adding columns to one table: both would take id 3, so only the first merges
+statement ok
+MERGE BRANCH b_first
+
+statement error
+MERGE BRANCH b_second
+----
+branch "b_second" changed the columns of table "twice", but main altered it since the fork
+
+# the failed merges changed nothing, and their branches still read their columns
+query I
+SELECT MAX(snapshot_id) = getvariable('head') + 1 FROM ducklake_snapshots('ducklake')
+----
+true
+
+statement ok
+SET BRANCH b_added
+
+query III
+FROM added ORDER BY a
+----
+1	10	5
+2	20	5
+3	30	5
+
+statement ok
+SET BRANCH b_second
+
+query IIT
+FROM twice ORDER BY a
+----
+1	10	NULL
+2	20	NULL
+3	30	NULL
+
+statement ok
+SET BRANCH main
+
+# main only changed rows: the column change merges, rows are matched on the branch's columns
+query TT
+SELECT status, regexp_extract(conflict, 'changed [0-9]+ row') FROM ducklake_merge_branch('ducklake', 'b_rows', dry_run => true) WHERE table_name = 'rows'
+----
+conflict	changed 1 row
+
+query ITT
+SELECT rowid, branch_change, main_change FROM ducklake_merge_branch('ducklake', 'b_rows', dry_run => true, table_name => 'rows', conflicts_only => true)
+----
+0	update	delete
+
+query III
+SELECT rowid, a, c FROM ducklake_branch_table('ducklake', 'b_rows', 'rows') WHERE rowid = 0
+----
+0	1	100
+
+# main deleted row 1, which the branch filled. Main changed only b of row 2, which the branch dropped: the rows compare
+# on a and c, so that row merges with the branch's value
+statement error
+MERGE BRANCH b_rows
+----
+changed 1 row(s) of table "rows" differently since the fork (rowid 0)
+
+statement ok
+MERGE BRANCH b_rows ON CONFLICT KEEP BRANCH
+
+query II
+FROM rows ORDER BY a
+----
+1	100
+2	200
+3	300
+4	0
