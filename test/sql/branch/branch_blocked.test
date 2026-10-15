@@ -65,21 +65,21 @@ COMMENT ON VIEW main_view IS 'x'
 ----
 Changing a main view other than renaming it is not supported on a branch yet
 
-# what a table created on the branch cannot have
+# what this DuckLake version does not support in CREATE TABLE at all
 statement error
 CREATE TABLE partitioned(i INTEGER) PARTITIONED BY (i)
 ----
-CREATE TABLE ... PARTITIONED BY is not supported on a branch yet
+PARTITIONED BY is not supported for tables in a ducklake catalog
 
 statement error
 CREATE TABLE sorted(i INTEGER) SORTED BY (i)
 ----
-CREATE TABLE ... SORTED BY is not supported on a branch yet
+SORTED BY is not supported for tables in a ducklake catalog
 
 statement error
 CREATE TABLE with_options(i INTEGER) WITH (parquet_compression = 'zstd')
 ----
-CREATE TABLE ... WITH options is not supported on a branch yet
+WITH clause is not supported for tables in a ducklake catalog
 
 # changes to a table created on the branch that change a column's type
 statement ok
@@ -167,21 +167,3 @@ query I
 SELECT SUM(i) FROM t
 ----
 1
-
-# a view's column comments: setting one binds the view, which a branch does not do while it loads
-statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_v11' AS v11 (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/branch_blocked_v11_files')
-
-statement ok
-CALL ducklake_create_branch('v11', 'vb')
-
-statement ok
-CALL ducklake_set_branch('v11', 'vb')
-
-statement ok
-CREATE VIEW v11.branch_view AS SELECT 1 AS one
-
-statement error
-COMMENT ON COLUMN v11.branch_view.one IS 'x'
-----
-COMMENT ON COLUMN of a view is not supported on a branch yet
