@@ -19,9 +19,11 @@ namespace duckdb {
 class ClientContext;
 class DBConfig;
 class DuckLakeDelete;
+class DuckLakeTableEntry;
 class DuckLakeTransaction;
 class ExtensionLoader;
 class FileSystem;
+class NodeStatistics;
 struct DuckLakeCompactionFileEntry;
 struct DuckLakeDeleteFile;
 struct DuckLakeFileListEntry;
@@ -61,6 +63,8 @@ public:
 	static idx_t InliningLimit(DuckLakeTransaction &transaction, idx_t limit);
 	//! DuckLakeFunctionInfo / DuckLakeTableEntry::CanUseGlobalStats - global stats describe main's head
 	static bool CanUseGlobalStats(DuckLakeTransaction &transaction);
+	//! DuckLakeMultiFileList::GetCardinality - on a branch, main's row count as the scan's estimate
+	static unique_ptr<NodeStatistics> BranchCardinality(ClientContext &context, DuckLakeTableEntry &table);
 	//! DuckLakeDelete::FlushDelete - writes a branch delete on a main file
 	static bool TryFlushDelete(const DuckLakeDelete &op, DuckLakeTransaction &transaction, ClientContext &context,
 	                           unordered_map<string, DuckLakeDeleteFile> &written_files, const string &filename,

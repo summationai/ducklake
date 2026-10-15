@@ -1,0 +1,66 @@
+# name: test/sql/branch/branch_cardinality.test
+# description: on a branch, a scan of a main table gets main's row count as the planner's estimate
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_cardinality_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE big AS SELECT range AS i FROM range(100000)
+
+statement ok
+CREATE TABLE small AS SELECT range AS i FROM range(10)
+
+statement ok
+CREATE TABLE empty_t (i INTEGER)
+
+# main: a table with no stats has no estimate, as before
+statement ok
+EXPLAIN SELECT * FROM empty_t
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+# the branch's scan of big is estimated at main's 100,000 rows
+query II
+EXPLAIN SELECT * FROM big
+----
+physical_plan	<REGEX>:.*~100,000 rows.*
+
+# still main's count after the branch deletes rows: an estimate, while the exact stats stay off on a branch
+statement ok
+DELETE FROM big WHERE i < 50000
+
+query II
+EXPLAIN SELECT * FROM big
+----
+physical_plan	<REGEX>:.*~100,000 rows.*
+
+query I
+SELECT count(*) FROM big
+----
+50000
+
+# a table main has no stats for gets no estimate on the branch either
+statement ok
+EXPLAIN SELECT * FROM empty_t
+
+# a join on the branch probes with the large table and builds on the small one
+query II
+EXPLAIN SELECT count(*) FROM big JOIN small ON big.i = small.i
+----
+physical_plan	<REGEX>:.*Table: big[ │]*Table: small.*
