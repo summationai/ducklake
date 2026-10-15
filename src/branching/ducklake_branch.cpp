@@ -25,11 +25,6 @@
 
 namespace duckdb {
 
-// out-of-class definitions of the constants, which C++11 needs once they are odr-used
-constexpr const char *DuckLakeBranchState::KEY;
-constexpr idx_t DuckLakeBranchManager::BRANCH_FILE_ID_BASE;
-constexpr const char *DuckLakeBranchManager::MAIN_BRANCH_NAME;
-
 //===--------------------------------------------------------------------===//
 // Per-connection selection
 //===--------------------------------------------------------------------===//
@@ -345,6 +340,7 @@ static DuckLakeDeleteFile ReadDeleteFileRow(DuckLakeCatalog &catalog, const vect
 	delete_file.delete_count = row[7].GetValue<idx_t>();
 	delete_file.file_size_bytes = row[8].GetValue<idx_t>();
 	delete_file.footer_size = row[9].IsNull() ? 0 : row[9].GetValue<idx_t>();
+	delete_file.row_group_count = OptionalIndex(row[10]);
 	delete_file.encryption_key = row[11].IsNull() ? string() : Blob::FromBase64(row[11].GetValue<string>());
 	return delete_file;
 }
@@ -426,6 +422,8 @@ static void LoadFileDetails(DuckLakeTransaction &transaction, const DuckLakeBran
 		if (!row.IsNull(7) && col_stats.extra_stats) {
 			col_stats.extra_stats->Deserialize(row.GetValue<string>(7));
 		}
+		col_stats.min_is_exact = !row.IsNull(8) && row.GetValue<bool>(8);
+		col_stats.max_is_exact = !row.IsNull(9) && row.GetValue<bool>(9);
 		if (!row.IsNull(10)) {
 			col_stats.column_size_bytes = row.GetValue<idx_t>(10);
 		}
@@ -463,6 +461,7 @@ void DuckLakeBranchManager::LoadBranch(DuckLakeTransaction &transaction, const D
 		file.row_count = row.GetValue<idx_t>(4);
 		file.file_size_bytes = row.GetValue<idx_t>(5);
 		file.footer_size = OptionalIndex(row.GetBaseValue(6));
+		file.row_group_count = OptionalIndex(row.GetBaseValue(7));
 		file.partition_id = OptionalIndex(row.GetBaseValue(8));
 		auto encryption_key = row.GetBaseValue(9);
 		file.encryption_key = encryption_key.IsNull() ? string() : Blob::FromBase64(encryption_key.GetValue<string>());
@@ -549,7 +548,8 @@ void DuckLakeBranchManager::LoadBranch(DuckLakeTransaction &transaction, const D
 	}
 	for (auto &entry : dropped) {
 		auto &reference = main_files[entry.second];
-		transaction.DropFile(entry.first, DataFileIndex(entry.second), reference.path);
+		transaction.DropFile(entry.first, DataFileIndex(entry.second), reference.path, reference.row_count,
+		                     reference.file_size_bytes);
 		loaded.dropped_files.emplace(entry.second, entry.first);
 	}
 	if (for_merge) {
@@ -591,11 +591,12 @@ static string DeleteFileValues(DuckLakeMetadataManager &metadata_manager, idx_t 
                                TableIndex table_id, idx_t seq, const string &target_data_file,
                                const string &target_branch_file, const DuckLakeDeleteFile &delete_file) {
 	auto path = metadata_manager.GetRelativePath(delete_file.file_name);
-	return StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, %s, %s, %s, %d, %d, %d, NULL, %s)", file_id, branch_id,
+	return StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, %s, %s, %s, %d, %d, %d, %s, %s)", file_id, branch_id,
 	                          table_id.index, seq, target_data_file, target_branch_file,
 	                          DuckLakeUtil::SQLLiteralToString(path.path), path.path_is_relative ? "true" : "false",
 	                          DuckLakeUtil::SQLLiteralToString(DeleteFileFormatToString(delete_file.format)),
 	                          delete_file.delete_count, delete_file.file_size_bytes, delete_file.footer_size,
+	                          OptionalToSQL(delete_file.row_group_count),
 	                          DuckLakeUtil::EncryptionKeyLiteral(delete_file.encryption_key));
 }
 
@@ -649,20 +650,22 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				file_id = next_file_id();
 				inserted_tables.insert(table_id);
 				auto path = metadata_manager.GetRelativePath(file.file_name);
-				AppendValues(
-				    data_rows,
-				    StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, NULL, %s, %s)", file_id,
-				                       branch_id, table_id.index, new_seq, DuckLakeUtil::SQLLiteralToString(path.path),
-				                       path.path_is_relative ? "true" : "false", file.row_count, file.file_size_bytes,
-				                       OptionalToSQL(file.footer_size), OptionalToSQL(file.partition_id),
-				                       DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key)));
+				AppendValues(data_rows,
+				             StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, %s)",
+				                                file_id, branch_id, table_id.index, new_seq,
+				                                DuckLakeUtil::SQLLiteralToString(path.path),
+				                                path.path_is_relative ? "true" : "false", file.row_count,
+				                                file.file_size_bytes, OptionalToSQL(file.footer_size),
+				                                OptionalToSQL(file.row_group_count), OptionalToSQL(file.partition_id),
+				                                DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key)));
 				for (auto &stats_entry : file.column_stats) {
 					auto stats = DuckLakeColumnStatsInfo::FromColumnStats(stats_entry.first, stats_entry.second);
-					AppendValues(stats_rows, StringUtil::Format(
-					                             "(%d, %d, %d, %d, %s, %s, %s, %s, %s, %s, %s, NULL, NULL)", file_id,
-					                             branch_id, table_id.index, stats_entry.first.index,
-					                             stats.column_size_bytes, stats.value_count, stats.null_count,
-					                             stats.min_val, stats.max_val, stats.contains_nan, stats.extra_stats));
+					AppendValues(stats_rows,
+					             StringUtil::Format("(%d, %d, %d, %d, %s, %s, %s, %s, %s, %s, %s, %s, %s)", file_id,
+					                                branch_id, table_id.index, stats_entry.first.index,
+					                                stats.column_size_bytes, stats.value_count, stats.null_count,
+					                                stats.min_val, stats.max_val, stats.contains_nan, stats.extra_stats,
+					                                stats.min_is_exact, stats.max_is_exact));
 				}
 				for (auto &partition : file.partition_values) {
 					auto value = partition.partition_value.IsNull()
@@ -1045,7 +1048,8 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 		}
 		auto &table = entry->Cast<DuckLakeTableEntry>();
 		auto &schema = table.ParentSchema().Cast<DuckLakeSchemaEntry>();
-		bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table_id);
+		bool use_deletion_vectors =
+		    catalog.WriteDeletionVectors(schema.GetSchemaId(), table_id, &table.GetTableOptions());
 		auto row_merged = merge.row_merge.find(table_id) != merge.row_merge.end();
 		auto main_files = metadata_manager.GetExtendedFilesForTable(table, head, nullptr);
 		unordered_map<string, reference<DuckLakeFileListExtendedEntry>> files_by_path;
@@ -1102,7 +1106,8 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 				if (branch_delete) {
 					ForgetDeleteFiles(transaction, table_id, data_file_path);
 				}
-				transaction.DropFile(table_id, main_file.file_id, data_file_path);
+				transaction.DropFile(table_id, main_file.file_id, data_file_path, main_file.row_count,
+				                     main_file.file.file_size_bytes);
 				continue;
 			}
 			if (deletes.branch_only.empty()) {
@@ -1124,7 +1129,7 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 				WriteDeleteFileWithSnapshotsInput input {
 				    context,        transaction,    fs,        table.DataPath(),
 				    encryption_key, data_file_path, positions, DeleteFileSource::REGULAR};
-				written = WriteBranchDeleteFile(context, input, use_deletion_vectors);
+				written = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
 				written.overwrites_existing_delete = true;
 				written.overwritten_delete_file.delete_file_id = main_file.delete_file_id;
 				written.overwritten_delete_file.path = main_file.delete_file.path;
@@ -1142,7 +1147,7 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 				                            data_file_path,
 				                            deletes.branch_only,
 				                            DeleteFileSource::REGULAR};
-				written = WriteBranchDeleteFile(context, input, use_deletion_vectors);
+				written = DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors);
 			}
 			written.data_file_id = main_file.file_id;
 			vector<DuckLakeDeleteFile> written_files;
@@ -1177,8 +1182,11 @@ void DuckLakeBranchManager::ForgetFilesMainEmptied(DuckLakeTransaction &transact
 			continue;
 		}
 		auto references = ResolveMainFiles(transaction, emptied, merge.fork_snapshot, merge.loaded.info);
+		auto &stats = state.dropped_file_stats[table.first];
 		for (auto &reference : references) {
 			state.dropped_files.erase(reference.second.path);
+			stats.row_count -= reference.second.row_count;
+			stats.file_size_bytes -= reference.second.file_size_bytes;
 		}
 	}
 }
@@ -1247,8 +1255,8 @@ DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &tran
 	auto context_ref = transaction.context.lock();
 	for (auto &table : merge->row_merge) {
 		table.second.on_conflict = on_conflict;
-		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName(), branch->name, branch->fork_snapshot_id,
-		             merge->head_snapshot.snapshot_id, table.second);
+		PlanRowMerge(*context_ref, transaction.GetCatalog().GetName().GetIdentifierName(), branch->name,
+		             branch->fork_snapshot_id, merge->head_snapshot.snapshot_id, table.second);
 	}
 	ApplyRowMerge(transaction, *merge);
 	RebaseMainDeletes(transaction, *merge);
@@ -1357,6 +1365,7 @@ TransactionChangeInformation RestrictToTable(const TransactionChangeInformation 
 	keep(changes.dropped_views, result.dropped_views);
 	keep(changes.tables_inserted_into, result.tables_inserted_into);
 	keep(changes.tables_deleted_from, result.tables_deleted_from);
+	keep(changes.tables_delete_attempted, result.tables_delete_attempted);
 	keep(changes.tables_inserted_inlined, result.tables_inserted_inlined);
 	keep(changes.tables_deleted_inlined, result.tables_deleted_inlined);
 	keep(changes.tables_flushed_inlined, result.tables_flushed_inlined);
@@ -1377,11 +1386,12 @@ TransactionChangeInformation RestrictToTable(const TransactionChangeInformation 
 }
 
 //! The transaction's changes limited to one schema
-TransactionChangeInformation RestrictToSchema(const TransactionChangeInformation &changes, SchemaIndex schema_id,
-                                              const string &schema_name) {
+TransactionChangeInformation RestrictToSchema(const TransactionChangeInformation &changes, SchemaIndex schema_id) {
 	TransactionChangeInformation result;
-	if (changes.created_schemas.find(schema_name) != changes.created_schemas.end()) {
-		result.created_schemas.insert(schema_name);
+	for (auto &entry : changes.created_schemas) {
+		if (entry.second.get().GetSchemaId() == schema_id) {
+			result.created_schemas.insert(entry);
+		}
 	}
 	for (auto &entry : changes.dropped_schemas) {
 		if (entry.first == schema_id) {
@@ -1416,7 +1426,9 @@ void DuckLakeBranchManager::DiscardLoadedBranch(DuckLakeTransaction &transaction
 	auto &state = *transaction.state;
 	state.local_changes.Clear();
 	state.dropped_files.clear();
+	state.dropped_file_stats.clear();
 	state.tables_deleted_from.clear();
+	state.tables_delete_attempted.clear();
 	ClearDefinitions(transaction);
 }
 
@@ -1463,8 +1475,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		auto &entry = entries[id];
 		entry.table_id = id;
 		entry.object_type = object.type == CatalogType::VIEW_ENTRY ? "view" : "table";
-		entry.schema_name = object.ParentSchema().name;
-		entry.table_name = object.name;
+		entry.schema_name = object.ParentSchema().name.GetIdentifierName();
+		entry.table_name = object.name.GetIdentifierName();
 		return entry;
 	};
 	auto get_entry = [&](TableIndex table_id) -> DuckLakeMergePreviewEntry & {
@@ -1569,8 +1581,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 			}
 			// a table or view of main the branch renamed, or changed the columns of (labelled with its changes below)
 			auto &entry = is_table ? get_entry(id) : add_entry(id, main_view(id));
-			if (object.name != entry.table_name) {
-				entry.new_name = object.name;
+			if (object.name.GetIdentifierName() != entry.table_name) {
+				entry.new_name = object.name.GetIdentifierName();
 				AddLabel(entry.branch_changes, "renamed");
 			}
 		}
@@ -1584,7 +1596,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 	auto add_schema_entry = [&](DuckLakeSchemaEntry &schema, const char *label) {
 		auto &entry = schema_entries[schema.GetSchemaId()];
 		entry.object_type = "schema";
-		entry.schema_name = schema.name;
+		entry.schema_name = schema.name.GetIdentifierName();
 		entry.branch_changes.emplace_back(label);
 	};
 	if (state.new_schemas) {
@@ -1611,8 +1623,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 	auto head_snapshot = transaction.GetSnapshot();
 	for (auto &table : row_merge) {
 		table.second.on_conflict = on_conflict;
-		PlanRowMerge(context, catalog.GetName(), name, branch->fork_snapshot_id, head_snapshot.snapshot_id,
-		             table.second);
+		PlanRowMerge(context, catalog.GetName().GetIdentifierName(), name, branch->fork_snapshot_id,
+		             head_snapshot.snapshot_id, table.second);
 	}
 	set<TableIndex> main_tables, main_views;
 	for (auto &entry : entries) {
@@ -1686,7 +1698,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		}
 		check(entry, object_changes);
 		if (row_merged != row_merge.end() && entry.conflict.empty() && !row_merged->second.conflicts.empty()) {
-			entry.conflict = RowConflictMessage(transaction.GetCatalog().GetName(), name, row_merged->second);
+			entry.conflict =
+			    RowConflictMessage(transaction.GetCatalog().GetName().GetIdentifierName(), name, row_merged->second);
 		}
 		if (table_local_changes != all_local_changes.end()) {
 			table_local_changes->second = std::move(local_changes.changes[table_id]);
@@ -1704,7 +1717,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		if (other_changes.dropped_schemas.find(entry_pair.first) != other_changes.dropped_schemas.end()) {
 			entry.main_changes.emplace_back("dropped");
 		}
-		check(entry, RestrictToSchema(changes, entry_pair.first, entry.schema_name));
+		check(entry, RestrictToSchema(changes, entry_pair.first));
 		result.push_back(std::move(entry));
 	}
 	local_changes.changes = std::move(all_local_changes);

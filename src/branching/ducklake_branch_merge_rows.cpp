@@ -1,7 +1,6 @@
 #include "branching/ducklake_branch_merge_rows.hpp"
 
 #include "branching/ducklake_branch.hpp"
-#include "branching/ducklake_branch_util.hpp"
 #include "common/ducklake_util.hpp"
 #include "common/index.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -44,9 +43,9 @@ void BranchTableColumns(ClientContext &context, const string &catalog_name, cons
 	auto connection = BranchSqlConnection(context, catalog_name, branch_name);
 	auto &branch_context = *connection->context;
 	branch_context.RunFunctionInTransaction([&]() {
-		auto entry =
-		    Catalog::GetEntry(branch_context, catalog_name, schema_name,
-		                      EntryLookupInfo(CatalogType::TABLE_ENTRY, table_name), OnEntryNotFound::RETURN_NULL);
+		QualifiedName name {Identifier(catalog_name), Identifier(schema_name), Identifier(table_name)};
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, name);
+		auto entry = Catalog::GetEntry(branch_context, lookup, OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			throw InvalidInputException("Table \"%s.%s\" does not exist on branch \"%s\"", schema_name, table_name,
 			                            branch_name);
@@ -56,7 +55,7 @@ void BranchTableColumns(ClientContext &context, const string &catalog_name, cons
 			                            StringUtil::Lower(CatalogTypeToString(entry->type)));
 		}
 		for (auto &column : entry->Cast<DuckLakeTableEntry>().GetColumns().Logical()) {
-			names.push_back(column.Name());
+			names.push_back(column.Name().GetIdentifierName());
 			types.push_back(column.Type());
 		}
 	});
@@ -74,7 +73,7 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);
 	}
 	DuckLakeMergeRowsBindData result;
-	result.catalog_name = catalog.GetName();
+	result.catalog_name = catalog.GetName().GetIdentifierName();
 	result.branch_name = branch_name;
 	result.schema_name = schema_name;
 	result.table_name = table_name;
@@ -85,9 +84,9 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	auto &branch_context = *connection->context;
 	TableIndex main_table_id;
 	branch_context.RunFunctionInTransaction([&]() {
-		auto entry =
-		    Catalog::GetEntry(branch_context, result.catalog_name, schema_name,
-		                      EntryLookupInfo(CatalogType::TABLE_ENTRY, table_name), OnEntryNotFound::RETURN_NULL);
+		QualifiedName name(Identifier(result.catalog_name), Identifier(schema_name), Identifier(table_name));
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, name);
+		auto entry = Catalog::GetEntry(branch_context, lookup, OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			throw InvalidInputException("Table \"%s.%s\" does not exist on branch \"%s\"", schema_name, table_name,
 			                            branch_name);
@@ -98,7 +97,7 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		}
 		auto &table = entry->Cast<DuckLakeTableEntry>();
 		for (auto &column : table.GetColumns().Logical()) {
-			result.column_names.push_back(column.Name());
+			result.column_names.push_back(column.Name().GetIdentifierName());
 			result.column_types.push_back(column.Type());
 		}
 		auto &branch_transaction = DuckLakeTransaction::Get(branch_context, catalog);
@@ -113,7 +112,7 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		if (!fork_entry) {
 			throw InternalException("A table of main the branch reads does not exist at its fork");
 		}
-		result.fork_table_name = fork_entry->name;
+		result.fork_table_name = fork_entry->name.GetIdentifierName();
 		main_table_id = table.GetTableId();
 		DuckLakeBranchManager::ProjectColumns(table, fork_entry->Cast<DuckLakeTableEntry>(), result.branch_columns,
 		                                      result.fork_columns);

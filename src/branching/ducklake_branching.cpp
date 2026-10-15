@@ -6,9 +6,11 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parser_extension.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_metadata_info.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
+#include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_transaction_state.hpp"
 
@@ -34,6 +36,9 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 void DuckLakeBranching::OnTransactionStart(DuckLakeTransaction &transaction, ClientContext &context) {
 	auto &catalog = transaction.GetCatalog();
 	if (!catalog.IsInitialized() || catalog.CatalogSnapshot()) {
+		return;
+	}
+	if (context.registered_state->Get<DuckLakeInternalConnectionState>(DuckLakeInternalConnectionState::KEY)) {
 		return;
 	}
 	auto branch_state = context.registered_state->Get<DuckLakeBranchState>(DuckLakeBranchState::KEY);
@@ -149,6 +154,19 @@ bool DuckLakeBranching::CanUseGlobalStats(DuckLakeTransaction &transaction) {
 	return !IsOnBranch(transaction);
 }
 
+unique_ptr<NodeStatistics> DuckLakeBranching::BranchCardinality(ClientContext &context, DuckLakeTableEntry &table) {
+	auto &transaction = DuckLakeTransaction::Get(context, table.ParentCatalog());
+	if (!IsOnBranch(transaction)) {
+		return nullptr;
+	}
+	// a table the branch created has no main stats
+	auto stats = table.ParentCatalog().Cast<DuckLakeCatalog>().GetTableStats(transaction, table.GetTableId());
+	if (!stats) {
+		return nullptr;
+	}
+	return make_uniq<NodeStatistics>(stats->record_count);
+}
+
 bool DuckLakeBranching::TryFlushDelete(const DuckLakeDelete &op, DuckLakeTransaction &transaction,
                                        ClientContext &context, unordered_map<string, DuckLakeDeleteFile> &written_files,
                                        const string &filename, const DuckLakeFileListExtendedEntry &data_file_info,
@@ -225,10 +243,12 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 		return false;
 	}
 	auto newest_fork = *std::max_element(forks.begin(), forks.end());
-	auto result = transaction.Query(StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d "
-	                                                   "AND (end_snapshot IS NULL OR end_snapshot > %d) "
-	                                                   "LIMIT 1",
-	                                                   inlined_table.table_name, newest_fork, newest_fork));
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto col_names = metadata_manager.InlinedColNames();
+	auto result = metadata_manager.Query(
+	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d AND (%s IS NULL OR %s > %d) LIMIT 1",
+	                       inlined_table.table_name, col_names.begin_snapshot, newest_fork, col_names.end_snapshot,
+	                       col_names.end_snapshot, newest_fork));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
 	}
@@ -239,17 +259,18 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 	return false;
 }
 
-void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, vector<string> &known_files) {
+void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, unordered_set<string> &known_files,
+                                      const std::function<string(const string &)> &canonical_path) {
 	if (!DuckLakeBranchManager::HasBranchTables(transaction)) {
 		return;
 	}
 	// files written on active branches are not listed in the main file tables
-	auto result = transaction.Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
+	auto result = transaction.GetMetadataManager().Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to get branch files from DuckLake: ");
 	}
 	for (auto &row : *result) {
-		known_files.push_back(row.GetValue<string>(0));
+		known_files.insert(canonical_path(row.GetValue<string>(0)));
 	}
 }
 
