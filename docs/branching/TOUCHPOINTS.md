@@ -31,6 +31,7 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | `src/storage/ducklake_scan.cpp` | `DuckLakeFunctionInfo::CanUseGlobalStats` | `&& CanUseGlobalStats(*active_transaction)` | global stats describe main's head, not a branch |
 | `src/storage/ducklake_table_entry.cpp` | `DuckLakeTableEntry::CanUseGlobalStats` | `&& CanUseGlobalStats(transaction)` | same |
 | `src/storage/ducklake_multi_file_list.cpp` | `GetFilesForTable`, the local-deletes loop | `PrepareLocalDelete(...)` | a branch delete file already holds main's inlined file deletions |
+| | `GetCardinality`, when there are no stats | `return BranchCardinality(context, read_info.table)` (replaces `return nullptr`) | on a branch the planner still gets main's row count as an estimate |
 | `src/storage/ducklake_metadata_manager.cpp` | `GetOrphanFilesForCleanup`, after the known files are read | `AddKnownFiles(...)` | branch files are not orphans |
 | `src/functions/ducklake_expire_snapshots.cpp` | bind, after the "never the latest snapshot" filter | `filter += ExpirableSnapshotFilter(...)` | open branches pin their fork snapshot |
 | | bind, after `DuckLakeTransaction::Get` | `EnsureNotOnBranch` | |
