@@ -1,4 +1,5 @@
 #include "storage/ducklake_transaction.hpp"
+#include "branching/ducklake_branching.hpp"
 
 #include "storage/ducklake_commit_state.hpp"
 #include "storage/ducklake_transaction_state.hpp"
@@ -71,12 +72,12 @@ void LocalTableChanges::CleanupFiles(DatabaseInstance &db) {
 				fs.TryRemoveFile(file.file_name);
 			}
 			for (auto &del_file : file.delete_files) {
-				fs.TryRemoveFile(del_file.file_name);
+				DuckLakeBranching::TryRemoveDeleteFile(fs, del_file);
 			}
 		}
 		for (auto &file : table_changes.new_delete_files) {
 			for (auto &delete_files : file.second) {
-				fs.TryRemoveFile(delete_files.file_name);
+				DuckLakeBranching::TryRemoveDeleteFile(fs, delete_files);
 			}
 		}
 		table_changes.new_data_files.clear();
@@ -148,7 +149,7 @@ void LocalTableChanges::DropTransactionLocalFile(ClientContext &context, TableIn
 		auto &file = table_files[i];
 		if (file.file_name == path) {
 			for (auto &del_file : file.delete_files) {
-				fs.RemoveFile(del_file.file_name);
+				DuckLakeBranching::RemoveDeleteFile(fs, del_file);
 			}
 			file.delete_files.clear();
 			// found the file - delete it from the table list and from disk
@@ -574,7 +575,9 @@ void LocalTableChanges::TransactionLocalDelete(ClientContext &context, TableInde
 				vector<string> files_to_delete;
 				files_to_delete.reserve(file.delete_files.size());
 				for (auto &old_file : file.delete_files) {
-					files_to_delete.push_back(old_file.file_name);
+					if (DuckLakeBranching::OwnsDeleteFile(old_file)) {
+						files_to_delete.push_back(old_file.file_name);
+					}
 				}
 				fs.RemoveFiles(files_to_delete);
 				file.delete_files.clear();
@@ -595,12 +598,12 @@ void LocalTableChanges::CleanupFiles(ClientContext &context, TableIndex table_id
 		for (auto &file : table_changes.new_data_files) {
 			fs.RemoveFile(file.file_name);
 			for (auto &del_file : file.delete_files) {
-				fs.TryRemoveFile(del_file.file_name);
+				DuckLakeBranching::TryRemoveDeleteFile(fs, del_file);
 			}
 		}
 		for (auto &file : table_changes.new_delete_files) {
 			for (auto &delete_files : file.second) {
-				fs.TryRemoveFile(delete_files.file_name);
+				DuckLakeBranching::TryRemoveDeleteFile(fs, delete_files);
 			}
 		}
 		changes.erase(table_entry);
@@ -624,7 +627,7 @@ void LocalTableChanges::AddDeletesToMap(ClientContext &context, vector<DuckLakeD
 				// If a file already exists we remove it
 				auto &fs = FileSystem::GetFileSystem(context);
 				for (auto &old_file : existing_entry->second) {
-					fs.RemoveFile(old_file.file_name);
+					DuckLakeBranching::RemoveDeleteFile(fs, old_file);
 				}
 				existing_entry->second.clear();
 			}
@@ -744,7 +747,9 @@ void DuckLakeTransaction::Start() {
 }
 
 void DuckLakeTransaction::Commit() {
-	if (ChangesMade()) {
+	if (DuckLakeBranching::TryCommit(*this)) {
+		// committed to a branch, or merged a branch into main
+	} else if (ChangesMade()) {
 		FlushChanges();
 	} else if (connection) {
 		connection->Commit();
@@ -1472,10 +1477,12 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		ducklake_catalog.SetCommittedSnapshotId(snapshot_id);
 	};
 	context.commit_info = state->commit_info;
+	DuckLakeBranching::PrepareCommitLoop(*this, context);
 	state->Commit(transaction_snapshot, transaction_changes, retry_config, context);
 }
 
 void DuckLakeTransaction::SetConfigOption(const DuckLakeConfigOption &option) {
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Setting a DuckLake option");
 	// write the config option to the metadata
 	metadata_manager->SetConfigOption(option);
 	// set the option in the catalog
@@ -1491,11 +1498,12 @@ void DuckLakeTransaction::SetCommitMessage(const DuckLakeSnapshotCommit &option)
 }
 
 void DuckLakeTransaction::DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots) {
-	auto &metadata_manager = GetMetadataManager();
-	metadata_manager.DeleteSnapshots(snapshots);
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Expiring snapshots");
+	DuckLakeBranching::DeleteSnapshots(*this, snapshots);
 }
 
 void DuckLakeTransaction::DeleteInlinedData(const DuckLakeInlinedTableInfo &inlined_table) {
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Deleting inlined data");
 	auto &metadata_manager = GetMetadataManager();
 	metadata_manager.DeleteInlinedData(inlined_table);
 }
@@ -1507,6 +1515,7 @@ void DuckLakeTransaction::DeleteFlushedInlinedData(const DuckLakeInlinedTableInf
 }
 
 void DuckLakeTransaction::MarkInlinedDataForDeletion(DuckLakeInlinedTableInfo inlined_table, idx_t flush_snapshot_id) {
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Flushing inlined data");
 	state->flushed_inlined_tables.push_back({std::move(inlined_table), flush_snapshot_id});
 }
 
@@ -1542,6 +1551,10 @@ string DuckLakeTransaction::GetDefaultSchemaName() {
 }
 
 DuckLakeSnapshot DuckLakeTransaction::GetSnapshot() {
+	DuckLakeSnapshot branch_snapshot;
+	if (DuckLakeBranching::TryGetSnapshot(*this, branch_snapshot)) {
+		return branch_snapshot;
+	}
 	auto catalog_snapshot = ducklake_catalog.CatalogSnapshot();
 	if (catalog_snapshot) {
 		// the catalog was opened at a specific snapshot - load that snapshot
@@ -1560,6 +1573,7 @@ DuckLakeSnapshot DuckLakeTransaction::GetSnapshot(optional_ptr<BoundAtClause> at
 		// no AT-clause - get the latest snapshot
 		return GetSnapshot();
 	}
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Time travel");
 	// construct a struct value from the AT clause in the form of {"unit": value} (e.g. {"version": 2}
 	// this is used as a caching key for the snapshot
 	child_list_t<Value> values;
@@ -1664,6 +1678,7 @@ void DuckLakeTransaction::AddDeletes(TableIndex table_id, vector<DuckLakeDeleteF
 }
 
 void DuckLakeTransaction::AddCompaction(TableIndex table_id, DuckLakeCompactionEntry entry) {
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Compaction");
 	state->local_changes.AddCompaction(table_id, std::move(entry));
 }
 
@@ -1707,6 +1722,7 @@ DuckLakeTransaction &DuckLakeTransaction::Get(ClientContext &context, Catalog &c
 }
 
 void DuckLakeTransaction::CreateEntry(unique_ptr<CatalogEntry> entry) {
+	DuckLakeBranching::CheckCreate(*this, *entry);
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	auto &set = GetOrCreateTransactionLocalEntries(*entry);
 	set.CreateEntry(std::move(entry));
@@ -1810,6 +1826,7 @@ bool DuckLakeTransaction::FileIsDropped(const string &path) const {
 }
 
 void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
+	DuckLakeBranching::CheckDrop(*this, entry);
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	switch (entry.type) {
 	case CatalogType::TABLE_ENTRY:
@@ -1896,6 +1913,7 @@ bool DuckLakeTransaction::IsRenamed(CatalogEntry &entry) {
 }
 
 void DuckLakeTransaction::AlterEntry(CatalogEntry &entry, unique_ptr<CatalogEntry> new_entry) {
+	DuckLakeBranching::CheckAlter(*this, entry, new_entry.get());
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	if (!new_entry) {
 		return;
@@ -1915,20 +1933,24 @@ void DuckLakeTransaction::AlterEntry(CatalogEntry &entry, unique_ptr<CatalogEntr
 static void HandleRenameOldEntry(DuckLakeCatalogSet &entries, const string &old_name, const string &new_name,
                                  TableIndex id, bool entry_is_transaction_local, set<TableIndex> &renamed_set,
                                  const set<TableIndex> &dropped_set) {
-	if (id.IsTransactionLocal()) {
-		// entry was created in this same transaction
+	if (!id.IsTransactionLocal() && !entry_is_transaction_local) {
+		// first rename of a committed entry that was untouched earlier in this transaction
+		// Invariant: an id cannot be both renamed and dropped in the same transaction.
+		D_ASSERT(dropped_set.find(id) == dropped_set.end());
+		renamed_set.insert(id);
+		return;
+	}
+	// changes made earlier in this transaction must still commit under the new name, but when the
+	// name does not change they are already chained under it and the drop would take them with it
+	if (!StringUtil::CIEquals(old_name, new_name)) {
 		auto dropped = entries.DropEntry(old_name);
 		auto new_entry_ptr = entries.GetEntry(new_name);
 		if (new_entry_ptr && dropped) {
 			new_entry_ptr->SetChild(std::move(dropped));
 		}
-	} else if (entry_is_transaction_local) {
-		// entry existed before this transaction and has already been renamed earlier in this txn
-		entries.DropEntry(old_name);
-	} else {
-		// first rename of a committed entry
-		// Invariant: an id cannot be both renamed and dropped in the same transaction.
-		D_ASSERT(dropped_set.find(id) == dropped_set.end());
+	}
+	if (!id.IsTransactionLocal()) {
+		// committed entry that was altered earlier in this transaction - the old row still needs closing
 		renamed_set.insert(id);
 	}
 }
@@ -2014,6 +2036,7 @@ DuckLakeCatalogSet &DuckLakeTransaction::GetOrCreateTransactionLocalEntries(Cata
 }
 
 optional_ptr<DuckLakeCatalogSet> DuckLakeTransaction::GetTransactionLocalSchemas() {
+	DuckLakeBranching::EnsureLoaded(*this);
 	return state->new_schemas;
 }
 
@@ -2073,6 +2096,7 @@ optional_ptr<CatalogEntry> DuckLakeTransaction::GetLocalEntryById(TableIndex tab
 }
 
 MappingIndex DuckLakeTransaction::AddNameMap(unique_ptr<DuckLakeNameMap> name_map) {
+	DuckLakeBranching::EnsureNotOnBranch(*this, "Adding data files");
 	// check if we can re-use a previously added name map
 	auto map_index = ducklake_catalog.TryGetCompatibleNameMap(*this, *name_map);
 	if (map_index.IsValid()) {
@@ -2113,6 +2137,7 @@ string DuckLakeTransaction::GenerateUUID() const {
 }
 
 idx_t DuckLakeTransaction::GetCatalogVersion() {
+	DuckLakeBranching::EnsureLoaded(*this);
 	if (catalog_version > 0) {
 		return catalog_version;
 	}

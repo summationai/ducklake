@@ -97,6 +97,10 @@ struct DuckLakeCommitContext {
 	DuckLakeSnapshotCommit commit_info;
 	//! When true, Commit() skips the post-commit DropEmptySupersededInlinedTables cleanup.
 	bool skip_drop_empty_inlined = false;
+	//! Runs after every conflict check (also on the first attempt) and may throw to abort the commit
+	std::function<void(const SnapshotChangeInformation &)> pre_commit_check;
+	//! SQL appended to every attempt's commit batch
+	string extra_commit_sql;
 };
 
 //! Holds the per-transaction mutable change state (new/dropped/renamed catalog entries, local file
@@ -111,9 +115,10 @@ public:
 	void Commit(DuckLakeSnapshot transaction_snapshot, const TransactionChangeInformation &transaction_changes,
 	            const DuckLakeRetryConfig &retry_config, const DuckLakeCommitContext &context);
 
-	SnapshotAndStats CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
-	                                   const TransactionChangeInformation &changes,
-	                                   const std::function<unique_ptr<QueryResult>(string)> &executor);
+	SnapshotAndStats
+	CheckForConflicts(DuckLakeSnapshot transaction_snapshot, const TransactionChangeInformation &changes,
+	                  const std::function<unique_ptr<QueryResult>(string)> &executor,
+	                  const std::function<void(const SnapshotChangeInformation &)> &pre_commit_check = nullptr);
 	void CheckForConflicts(const TransactionChangeInformation &changes, const SnapshotChangeInformation &other_changes,
 	                       DuckLakeSnapshot transaction_snapshot,
 	                       const std::function<unique_ptr<QueryResult>(string)> &executor) const;

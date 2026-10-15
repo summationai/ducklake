@@ -1,4 +1,5 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_schema_entry.hpp"
@@ -268,6 +269,7 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 	// FIXME: pass in the sort_data so that list of files is approximately sorted in the same way
 	// (sorted by the min/max metadata)
 	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot, filter_options);
+	DuckLakeBranching::FilterCompactionCandidates(transaction, type, files);
 
 	// iterate over the files and split into separate compaction groups
 	compaction_map_t<DuckLakeCompactionCandidates> candidates;
@@ -452,8 +454,10 @@ unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique
 unique_ptr<LogicalOperator>
 DuckLakeCompactor::GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry> source_files) {
 	// get the table entry at the specified snapshot
-	auto snapshot_id = source_files[0].file.begin_snapshot;
-	DuckLakeSnapshot snapshot(snapshot_id, source_files[0].schema_version, 0, 0);
+	// the table at the start of the files' schema version: a later snapshot would be cached under that version
+	auto schema_version = source_files[0].schema_version;
+	DuckLakeSnapshot snapshot(catalog.GetBeginSnapshotForSchemaVersion(table_id, schema_version, transaction),
+	                          schema_version, 0, 0);
 
 	auto entry = catalog.GetEntryById(transaction, snapshot, table_id);
 	if (!entry) {
@@ -751,6 +755,7 @@ unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableFunction
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Compaction");
 	string schema, table;
 	vector<unique_ptr<LogicalOperator>> compactions;
 	uint64_t max_files = NumericLimits<uint64_t>::Maximum() - 1;

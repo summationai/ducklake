@@ -1,0 +1,257 @@
+#include "branching/ducklake_branch_parser.hpp"
+
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/parser.hpp"
+#include "branching/ducklake_branch_functions.hpp"
+#include "branching/ducklake_branch.hpp"
+
+namespace duckdb {
+
+enum class DuckLakeBranchStatementType : uint8_t { CREATE_BRANCH, DROP_BRANCH, SET_BRANCH, MERGE_BRANCH };
+
+struct DuckLakeBranchParseData : public ParserExtensionParseData {
+	DuckLakeBranchStatementType type = DuckLakeBranchStatementType::SET_BRANCH;
+	string branch_name;
+	string source_branch;
+	bool if_exists = false;
+	//! MERGE BRANCH x ON CONFLICT KEEP MAIN | BRANCH: "main" or "branch"
+	string keep_on_conflict;
+
+	unique_ptr<ParserExtensionParseData> Copy() const override {
+		auto result = make_uniq<DuckLakeBranchParseData>();
+		result->type = type;
+		result->branch_name = branch_name;
+		result->source_branch = source_branch;
+		result->if_exists = if_exists;
+		result->keep_on_conflict = keep_on_conflict;
+		return std::move(result);
+	}
+
+	static string Quote(const string &name) {
+		return "\"" + StringUtil::Replace(name, "\"", "\"\"") + "\"";
+	}
+
+	string ToString() const override {
+		auto name = Quote(branch_name);
+		switch (type) {
+		case DuckLakeBranchStatementType::CREATE_BRANCH:
+			return "CREATE BRANCH " + name + (source_branch.empty() ? string() : " FROM " + Quote(source_branch));
+		case DuckLakeBranchStatementType::DROP_BRANCH:
+			return string("DROP BRANCH ") + (if_exists ? "IF EXISTS " : "") + name;
+		case DuckLakeBranchStatementType::MERGE_BRANCH:
+			return "MERGE BRANCH " + name +
+			       (keep_on_conflict.empty() ? string() : " ON CONFLICT KEEP " + StringUtil::Upper(keep_on_conflict));
+		default:
+			return "SET BRANCH " + name;
+		}
+	}
+};
+
+//! The tokens of one statement, without comments
+class BranchTokenReader {
+public:
+	explicit BranchTokenReader(const string &query) {
+		auto simplified = Parser::Tokenize(query);
+		for (idx_t i = 0; i < simplified.size(); i++) {
+			if (simplified[i].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT) {
+				continue;
+			}
+			auto end = i + 1 < simplified.size() ? simplified[i + 1].start : query.size();
+			auto text = TokenText(query, simplified[i].start, end);
+			if (!text.empty()) {
+				tokens.push_back({simplified[i].type, std::move(text)});
+			}
+		}
+	}
+
+	bool AtEnd() const {
+		return position >= tokens.size() || tokens[position].text == ";";
+	}
+
+	bool TryConsumeWord(const char *word) {
+		if (AtEnd() || !StringUtil::CIEquals(tokens[position].text, word)) {
+			return false;
+		}
+		position++;
+		return true;
+	}
+
+	bool TryConsumeName(string &result) {
+		if (AtEnd()) {
+			return false;
+		}
+		auto &token = tokens[position];
+		auto &text = token.text;
+		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT && text.size() >= 2 &&
+		    text.front() == '\'') {
+			result = StringUtil::Replace(text.substr(1, text.size() - 2), "''", "'");
+		} else if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+			result = StringUtil::Replace(text.substr(1, text.size() - 2), "\"\"", "\"");
+		} else if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR ||
+		           token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_NUMERIC_CONSTANT ||
+		           token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT) {
+			return false;
+		} else {
+			result = text;
+		}
+		position++;
+		return true;
+	}
+
+private:
+	//! A token's text runs from its start to the next token; whitespace and comments outside quotes end it
+	static string TokenText(const string &query, idx_t start, idx_t end) {
+		auto position = start;
+		char quote = '\0';
+		while (position < end) {
+			auto c = query[position];
+			if (quote != '\0') {
+				if (c == quote && position + 1 < end && query[position + 1] == quote) {
+					position += 2;
+					continue;
+				}
+				if (c == quote) {
+					quote = '\0';
+				}
+				position++;
+				continue;
+			}
+			auto next = position + 1 < end ? query[position + 1] : '\0';
+			if (StringUtil::CharacterIsSpace(c) || (c == '-' && next == '-') || (c == '/' && next == '*')) {
+				break;
+			}
+			if (c == '\'' || c == '"') {
+				quote = c;
+			}
+			position++;
+		}
+		return query.substr(start, position - start);
+	}
+
+	struct Token {
+		SimplifiedTokenType type;
+		string text;
+	};
+	vector<Token> tokens;
+	idx_t position = 0;
+};
+
+static ParserExtensionParseResult BranchSyntaxError(const string &message) {
+	return ParserExtensionParseResult(message);
+}
+
+static ParserExtensionParseResult DuckLakeBranchParse(ParserExtensionInfo *info, const string &query) {
+	BranchTokenReader reader(query);
+	auto data = make_uniq<DuckLakeBranchParseData>();
+	string usage;
+	if (reader.TryConsumeWord("CREATE")) {
+		if (!reader.TryConsumeWord("BRANCH")) {
+			return ParserExtensionParseResult();
+		}
+		data->type = DuckLakeBranchStatementType::CREATE_BRANCH;
+		usage = "CREATE BRANCH <name> [FROM main]";
+		if (!reader.TryConsumeName(data->branch_name)) {
+			return BranchSyntaxError("Expected a branch name - usage: " + usage);
+		}
+		if (reader.TryConsumeWord("FROM") && !reader.TryConsumeName(data->source_branch)) {
+			return BranchSyntaxError("Expected a branch name after FROM - usage: " + usage);
+		}
+	} else if (reader.TryConsumeWord("DROP")) {
+		if (!reader.TryConsumeWord("BRANCH")) {
+			return ParserExtensionParseResult();
+		}
+		data->type = DuckLakeBranchStatementType::DROP_BRANCH;
+		usage = "DROP BRANCH [IF EXISTS] <name>";
+		if (reader.TryConsumeWord("IF")) {
+			if (!reader.TryConsumeWord("EXISTS")) {
+				return BranchSyntaxError("Expected EXISTS after IF - usage: " + usage);
+			}
+			data->if_exists = true;
+		}
+		if (!reader.TryConsumeName(data->branch_name)) {
+			return BranchSyntaxError("Expected a branch name - usage: " + usage);
+		}
+	} else if (reader.TryConsumeWord("SET")) {
+		if (!reader.TryConsumeWord("BRANCH")) {
+			return ParserExtensionParseResult();
+		}
+		data->type = DuckLakeBranchStatementType::SET_BRANCH;
+		usage = "SET BRANCH <name>";
+		if (!reader.TryConsumeName(data->branch_name)) {
+			return BranchSyntaxError("Expected a branch name - usage: " + usage);
+		}
+	} else if (reader.TryConsumeWord("MERGE")) {
+		if (!reader.TryConsumeWord("BRANCH")) {
+			return ParserExtensionParseResult();
+		}
+		data->type = DuckLakeBranchStatementType::MERGE_BRANCH;
+		usage = "MERGE BRANCH <name> [ON CONFLICT KEEP MAIN | ON CONFLICT KEEP BRANCH]";
+		if (!reader.TryConsumeName(data->branch_name)) {
+			return BranchSyntaxError("Expected a branch name - usage: " + usage);
+		}
+		if (reader.TryConsumeWord("ON")) {
+			if (!reader.TryConsumeWord("CONFLICT") || !reader.TryConsumeWord("KEEP")) {
+				return BranchSyntaxError("Expected CONFLICT KEEP after ON - usage: " + usage);
+			}
+			if (reader.TryConsumeWord("MAIN")) {
+				data->keep_on_conflict = "main";
+			} else if (reader.TryConsumeWord("BRANCH")) {
+				data->keep_on_conflict = "branch";
+			} else {
+				return BranchSyntaxError("Expected MAIN or BRANCH after KEEP - usage: " + usage);
+			}
+		}
+	} else {
+		return ParserExtensionParseResult();
+	}
+	if (!reader.AtEnd()) {
+		return BranchSyntaxError("Unexpected input after the branch statement - usage: " + usage);
+	}
+	return ParserExtensionParseResult(std::move(data));
+}
+
+static ParserExtensionPlanResult DuckLakeBranchPlan(ParserExtensionInfo *info, ClientContext &context,
+                                                    unique_ptr<ParserExtensionParseData> parse_data) {
+	auto &data = static_cast<DuckLakeBranchParseData &>(*parse_data);
+	auto catalog_name = DatabaseManager::GetDefaultDatabase(context);
+
+	ParserExtensionPlanResult result;
+	result.parameters.push_back(Value(catalog_name));
+	result.parameters.push_back(Value(data.branch_name));
+	switch (data.type) {
+	case DuckLakeBranchStatementType::CREATE_BRANCH:
+		if (!data.source_branch.empty() &&
+		    !StringUtil::CIEquals(data.source_branch, DuckLakeBranchManager::MAIN_BRANCH_NAME)) {
+			throw NotImplementedException("Creating a branch from another branch is not supported yet");
+		}
+		result.function = DuckLakeBranchFunctions::GetCreateBranchFunction();
+		break;
+	case DuckLakeBranchStatementType::MERGE_BRANCH:
+		result.function = DuckLakeBranchFunctions::GetMergeBranchFunction();
+		if (!data.keep_on_conflict.empty()) {
+			result.function.arguments.push_back(LogicalType::VARCHAR);
+			result.parameters.push_back(Value(data.keep_on_conflict));
+		}
+		break;
+	case DuckLakeBranchStatementType::DROP_BRANCH:
+		result.function = DuckLakeBranchFunctions::GetDropBranchFunction();
+		result.function.arguments.push_back(LogicalType::BOOLEAN);
+		result.parameters.push_back(Value::BOOLEAN(data.if_exists));
+		break;
+	default:
+		result.function = DuckLakeBranchFunctions::GetSetBranchFunction();
+		break;
+	}
+	result.requires_valid_transaction = true;
+	result.return_type = StatementReturnType::QUERY_RESULT;
+	return result;
+}
+
+DuckLakeBranchParserExtension::DuckLakeBranchParserExtension() {
+	parse_function = DuckLakeBranchParse;
+	plan_function = DuckLakeBranchPlan;
+}
+
+} // namespace duckdb

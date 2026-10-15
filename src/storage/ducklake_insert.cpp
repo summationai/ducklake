@@ -1,4 +1,5 @@
 #include "storage/ducklake_catalog.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_field_data.hpp"
 #include "storage/ducklake_insert.hpp"
@@ -830,7 +831,8 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
 	// FIXME: if table already exists and we are doing CREATE IF NOT EXISTS - skip
 	reference<PhysicalOperator> root = plan;
 	optional_ptr<DuckLakeInlineData> inline_data;
-	idx_t data_inlining_row_limit = DataInliningRowLimit(context, duck_schema.GetSchemaId(), TableIndex());
+	idx_t data_inlining_row_limit = DuckLakeBranching::InliningLimit(
+	    duck_transaction, DataInliningRowLimit(context, duck_schema.GetSchemaId(), TableIndex()));
 	auto &metadata_manager = duck_transaction.GetMetadataManager();
 	if (data_inlining_row_limit > 0 && metadata_manager.CanInlineColumns(columns)) {
 		root = planner.Make<DuckLakeInlineData>(root.get(), data_inlining_row_limit);

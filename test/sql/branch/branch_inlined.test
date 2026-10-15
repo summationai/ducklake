@@ -1,0 +1,128 @@
+# name: test/sql/branch/branch_inlined.test
+# description: branches over main's inlined rows and inlined file deletions, and flushes on main
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_inlined_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+# a parquet file on main, with an inlined file deletion
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(20)
+
+statement ok
+DELETE FROM t WHERE i = 0
+
+# inlined rows on main
+statement ok
+INSERT INTO t VALUES (100), (101), (102)
+
+# inlined rows deleted on main before the fork do not keep their table from being flushed
+statement ok
+CREATE TABLE u(i INTEGER)
+
+statement ok
+INSERT INTO u VALUES (1), (2)
+
+statement ok
+DELETE FROM u
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+# deletes of a parquet row and of an inlined row on the branch
+statement ok
+DELETE FROM t WHERE i = 5 OR i = 100
+
+# branch writes are never inlined
+statement ok
+INSERT INTO t VALUES (200)
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+21	588
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_inlined_delete
+----
+1
+
+# main flushes - its inlined rows are visible at the fork, so they stay where the branch's deletes point at them
+statement ok
+SET BRANCH main
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_data_1_1
+----
+3
+
+query I
+SELECT table_name FROM ducklake_flush_inlined_data('ducklake') ORDER BY table_name
+----
+u
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_data_1_1
+----
+3
+
+# main's inlined file deletion was flushed into a main delete file - the branch keeps its own complete delete file
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_delete_1
+----
+0
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+22	493
+
+statement ok
+SET BRANCH b
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+21	588
+
+query I
+SELECT COUNT(*) FROM t WHERE i IN (0, 5, 100)
+----
+0
+
+# once the branch is dropped, main can flush its inlined rows again
+statement ok
+SET BRANCH main
+
+statement ok
+DROP BRANCH b
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_data_1_1
+----
+0
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+22	493

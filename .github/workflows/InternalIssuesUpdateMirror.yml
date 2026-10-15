@@ -1,12 +1,6 @@
 name: Update Mirror Issue
 on:
-  discussion:
-    types:
-      - labeled
-  issues:
-    types:
-      - closed
-      - reopened
+  workflow_dispatch:
 
 env:
   GH_TOKEN: ${{ secrets.DUCKDBLABS_BOT_TOKEN }}

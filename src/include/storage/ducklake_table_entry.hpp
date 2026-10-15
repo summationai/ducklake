@@ -177,6 +177,7 @@ public:
 	DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, unique_ptr<DuckLakeSort> sort_data);
 
 private:
+	friend class DuckLakeBranchManager;
 	TableIndex table_id;
 	string table_uuid;
 	string data_path;

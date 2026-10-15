@@ -27,7 +27,11 @@
         "test/sql/rewrite_data_files/test_last_snapshot_rewrite.test",
         "test/sql/rewrite_data_files/test_rewrite_concurrency.test",
         "test/sql/rewrite_data_files/test_rewrite_db.test",
-        "test/sql/issues/issue_1074.test"
+        "test/sql/issues/issue_1074.test",
+        "test/sql/branch/branch_deletes.test",
+        "test/sql/branch/merge_deletes.test",
+        "test/sql/branch/merge_encrypted.test",
+        "test/sql/branch/merge_rows.test"
       ]
     }
   ]

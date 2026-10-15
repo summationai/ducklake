@@ -1,0 +1,90 @@
+# name: test/sql/branch/branch_isolation.test
+# description: two branches and main commit independently and never see each other's changes
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_isolation_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(id INTEGER, v VARCHAR)
+
+statement ok
+INSERT INTO t SELECT range, 'main' FROM range(100)
+
+statement ok
+CREATE BRANCH b1
+
+# main moves on before the second branch forks
+statement ok
+INSERT INTO t VALUES (1000, 'main-later')
+
+statement ok
+CREATE BRANCH b2
+
+query II
+SELECT branch_name, fork_snapshot_id FROM ducklake_branches('ducklake') ORDER BY branch_id
+----
+b1	2
+b2	3
+
+statement ok con1
+USE ducklake
+
+statement ok con2
+USE ducklake
+
+statement ok con1
+SET BRANCH b1
+
+statement ok con2
+SET BRANCH b2
+
+statement ok con1
+UPDATE t SET v = 'b1' WHERE id < 10
+
+statement ok con2
+DELETE FROM t WHERE id < 50
+
+statement ok con2
+INSERT INTO t VALUES (2000, 'b2')
+
+# main keeps committing while the branches are open
+statement ok
+UPDATE t SET v = 'main-updated' WHERE id >= 90 AND id < 100
+
+query III con1
+SELECT COUNT(*), COUNT(*) FILTER (v = 'b1'), COUNT(*) FILTER (v LIKE 'main%' AND v <> 'main') FROM t
+----
+100	10	0
+
+query III con2
+SELECT COUNT(*), MIN(id), MAX(id) FROM t
+----
+52	50	2000
+
+query I con2
+SELECT COUNT(*) FROM t WHERE v = 'main-later'
+----
+1
+
+query III
+SELECT COUNT(*), COUNT(*) FILTER (v = 'main-updated'), COUNT(*) FILTER (v LIKE 'b%') FROM t
+----
+101	10	0
+
+query II
+SELECT branch_name, commit_count FROM ducklake_branches('ducklake') ORDER BY branch_id
+----
+b1	1
+b2	2

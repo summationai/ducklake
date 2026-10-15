@@ -1,4 +1,5 @@
 #include "storage/ducklake_metadata_manager.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_variant_stats.hpp"
 #include "common/ducklake_util.hpp"
@@ -4597,6 +4598,7 @@ vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOrphanFilesForCleanup
 	for (auto &row : *known_files_res) {
 		known_files.push_back(row.GetValue<string>(0));
 	}
+	DuckLakeBranching::AddKnownFiles(transaction, known_files);
 
 	const string temp_table = "__ducklake_known_cleanup_files";
 	auto temp_table_identifier = DuckLakeUtil::SQLIdentifierToString(temp_table);

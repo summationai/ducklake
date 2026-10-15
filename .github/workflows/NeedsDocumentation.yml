@@ -1,14 +1,6 @@
 name: Create Documentation issue for the Needs Documentation label
 on:
-  discussion:
-    types:
-      - labeled
-  issues:
-    types:
-      - labeled
-  pull_request_target:
-    types:
-      - labeled
+  workflow_dispatch:
 
 env:
   GH_TOKEN: ${{ secrets.DUCKDBLABS_BOT_TOKEN }}

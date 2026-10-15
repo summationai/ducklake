@@ -1,4 +1,5 @@
 #include "storage/ducklake_catalog.hpp"
+#include "branching/ducklake_branching.hpp"
 
 #include "common/ducklake_types.hpp"
 #include "duckdb/catalog/catalog_entry/macro_catalog_entry.hpp"
@@ -1043,7 +1044,7 @@ idx_t DuckLakeCatalog::GetInliningLimit(ClientContext &context, DuckLakeTableEnt
 	if (!metadata_manager.CanInlineColumns(table.GetColumns())) {
 		return 0;
 	}
-	return limit;
+	return DuckLakeBranching::InliningLimit(transaction, limit);
 }
 
 unique_ptr<LogicalOperator> DuckLakeCatalog::BindAlterAddIndex(Binder &binder, TableCatalogEntry &table_entry,

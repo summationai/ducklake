@@ -1,4 +1,5 @@
 #include "functions/ducklake_table_functions.hpp"
+#include "branching/ducklake_branching.hpp"
 
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/string.hpp"
@@ -96,6 +97,7 @@ static unique_ptr<FunctionData> CleanupBind(ClientContext &context, TableFunctio
 	}
 
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "File cleanup");
 	auto &metadata_manager = transaction.GetMetadataManager();
 	result->files = metadata_manager.GetFilesForCleanup(result->GetFilter(), type, ducklake_catalog.Separator());
 

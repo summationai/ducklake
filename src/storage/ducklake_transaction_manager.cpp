@@ -1,4 +1,5 @@
 #include "storage/ducklake_transaction_manager.hpp"
+#include "branching/ducklake_branching.hpp"
 
 #include "duckdb/main/settings.hpp"
 
@@ -11,7 +12,9 @@ DuckLakeTransactionManager::DuckLakeTransactionManager(AttachedDatabase &db_p, D
 Transaction &DuckLakeTransactionManager::StartTransaction(ClientContext &context) {
 	auto transaction = make_shared_ptr<DuckLakeTransaction>(ducklake_catalog, *this, context);
 	transaction->Start();
-	if (Settings::Get<ImmediateTransactionModeSetting>(context) && get_snapshot) {
+	DuckLakeBranching::OnTransactionStart(*transaction, context);
+	if (Settings::Get<ImmediateTransactionModeSetting>(context) && get_snapshot && ducklake_catalog.IsInitialized() &&
+	    !DuckLakeBranching::IsOnBranch(*transaction)) {
 		get_snapshot = false;
 		// no snapshot loaded yet for this transaction - load it
 		transaction->GetSnapshot();
