@@ -59,9 +59,6 @@ void DuckLakeBranching::OnTransactionStart(DuckLakeTransaction &transaction, Cli
 	if (!catalog.IsInitialized() || catalog.CatalogSnapshot()) {
 		return;
 	}
-	if (context.registered_state->Get<DuckLakeInternalConnectionState>(DuckLakeInternalConnectionState::KEY)) {
-		return;
-	}
 	auto branch_state = context.registered_state->Get<DuckLakeBranchState>(DuckLakeBranchState::KEY);
 	DuckLakeBranchState::Selection selection;
 	if (branch_state && branch_state->TryGetSelection(catalog.GetOid(), selection)) {
@@ -264,12 +261,10 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 		return false;
 	}
 	auto newest_fork = *std::max_element(forks.begin(), forks.end());
-	auto &metadata_manager = transaction.GetMetadataManager();
-	auto col_names = metadata_manager.InlinedColNames();
-	auto result = metadata_manager.Query(
-	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d AND (%s IS NULL OR %s > %d) LIMIT 1",
-	                       inlined_table.table_name, col_names.begin_snapshot, newest_fork, col_names.end_snapshot,
-	                       col_names.end_snapshot, newest_fork));
+	auto result = transaction.Query(StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d "
+	                                                   "AND (end_snapshot IS NULL OR end_snapshot > %d) "
+	                                                   "LIMIT 1",
+	                                                   inlined_table.table_name, newest_fork, newest_fork));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
 	}
@@ -280,18 +275,17 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 	return false;
 }
 
-void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, unordered_set<string> &known_files,
-                                      const std::function<string(const string &)> &canonical_path) {
+void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, vector<string> &known_files) {
 	if (!DuckLakeBranchManager::HasBranchTables(transaction)) {
 		return;
 	}
 	// files written on active branches are not listed in the main file tables
-	auto result = transaction.GetMetadataManager().Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
+	auto result = transaction.Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to get branch files from DuckLake: ");
 	}
 	for (auto &row : *result) {
-		known_files.insert(canonical_path(row.GetValue<string>(0)));
+		known_files.push_back(row.GetValue<string>(0));
 	}
 }
 

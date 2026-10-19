@@ -3,6 +3,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "branching/ducklake_branch_functions.hpp"
 #include "branching/ducklake_branch.hpp"
 
@@ -51,24 +52,29 @@ struct DuckLakeBranchParseData : public ParserExtensionParseData {
 //! The tokens of one statement, without comments
 class BranchTokenReader {
 public:
-	explicit BranchTokenReader(const vector<SimpleToken> &tokens) : tokens(tokens) {
-		SkipComments();
+	explicit BranchTokenReader(const string &query) {
+		auto simplified = Parser::Tokenize(query);
+		for (idx_t i = 0; i < simplified.size(); i++) {
+			if (simplified[i].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT) {
+				continue;
+			}
+			auto end = i + 1 < simplified.size() ? simplified[i + 1].start : query.size();
+			auto text = TokenText(query, simplified[i].start, end);
+			if (!text.empty()) {
+				tokens.push_back({simplified[i].type, std::move(text)});
+			}
+		}
 	}
 
 	bool AtEnd() const {
-		if (position >= tokens.size()) {
-			return true;
-		}
-		auto type = tokens[position].type;
-		return type == TokenType::TERMINATOR || type == TokenType::END_OF_INPUT ||
-		       type == TokenType::END_OF_INPUT_AUTOCOMPLETE;
+		return position >= tokens.size() || tokens[position].text == ";";
 	}
 
 	bool TryConsumeWord(const char *word) {
 		if (AtEnd() || !StringUtil::CIEquals(tokens[position].text, word)) {
 			return false;
 		}
-		Advance();
+		position++;
 		return true;
 	}
 
@@ -78,52 +84,66 @@ public:
 		}
 		auto &token = tokens[position];
 		auto &text = token.text;
-		if (token.type == TokenType::STRING_LITERAL && text.size() >= 2 && text.front() == '\'') {
+		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT && text.size() >= 2 &&
+		    text.front() == '\'') {
 			result = StringUtil::Replace(text.substr(1, text.size() - 2), "''", "'");
 		} else if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
 			result = StringUtil::Replace(text.substr(1, text.size() - 2), "\"\"", "\"");
-		} else if (token.type == TokenType::OPERATOR || token.type == TokenType::NUMBER_LITERAL ||
-		           token.type == TokenType::STRING_LITERAL) {
+		} else if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR ||
+		           token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_NUMERIC_CONSTANT ||
+		           token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT) {
 			return false;
 		} else {
 			result = text;
 		}
-		Advance();
+		position++;
 		return true;
 	}
 
-	//! The number of tokens claimed, including the terminator
-	int64_t ConsumedTokens() const {
-		auto consumed = position;
-		if (consumed < tokens.size()) {
-			consumed++;
-		}
-		return NumericCast<int64_t>(consumed);
-	}
-
 private:
-	void Advance() {
-		position++;
-		SkipComments();
-	}
-	void SkipComments() {
-		while (position < tokens.size() && tokens[position].type == TokenType::COMMENT) {
+	//! A token's text runs from its start to the next token; whitespace and comments outside quotes end it
+	static string TokenText(const string &query, idx_t start, idx_t end) {
+		auto position = start;
+		char quote = '\0';
+		while (position < end) {
+			auto c = query[position];
+			if (quote != '\0') {
+				if (c == quote && position + 1 < end && query[position + 1] == quote) {
+					position += 2;
+					continue;
+				}
+				if (c == quote) {
+					quote = '\0';
+				}
+				position++;
+				continue;
+			}
+			auto next = position + 1 < end ? query[position + 1] : '\0';
+			if (StringUtil::CharacterIsSpace(c) || (c == '-' && next == '-') || (c == '/' && next == '*')) {
+				break;
+			}
+			if (c == '\'' || c == '"') {
+				quote = c;
+			}
 			position++;
 		}
+		return query.substr(start, position - start);
 	}
 
-	const vector<SimpleToken> &tokens;
+	struct Token {
+		SimplifiedTokenType type;
+		string text;
+	};
+	vector<Token> tokens;
 	idx_t position = 0;
 };
 
 static ParserExtensionParseResult BranchSyntaxError(const string &message) {
-	ParserExtensionParseResult result(message);
-	result.consumed_tokens = -1;
-	return result;
+	return ParserExtensionParseResult(message);
 }
 
-static ParserExtensionParseResult DuckLakeBranchParse(ParserExtensionInfo *info, const vector<SimpleToken> &tokens) {
-	BranchTokenReader reader(tokens);
+static ParserExtensionParseResult DuckLakeBranchParse(ParserExtensionInfo *info, const string &query) {
+	BranchTokenReader reader(query);
 	auto data = make_uniq<DuckLakeBranchParseData>();
 	string usage;
 	if (reader.TryConsumeWord("CREATE")) {
@@ -189,15 +209,13 @@ static ParserExtensionParseResult DuckLakeBranchParse(ParserExtensionInfo *info,
 	if (!reader.AtEnd()) {
 		return BranchSyntaxError("Unexpected input after the branch statement - usage: " + usage);
 	}
-	ParserExtensionParseResult result(std::move(data));
-	result.consumed_tokens = reader.ConsumedTokens();
-	return result;
+	return ParserExtensionParseResult(std::move(data));
 }
 
 static ParserExtensionPlanResult DuckLakeBranchPlan(ParserExtensionInfo *info, ClientContext &context,
                                                     unique_ptr<ParserExtensionParseData> parse_data) {
-	auto &data = parse_data->Cast<DuckLakeBranchParseData>();
-	auto catalog_name = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
+	auto &data = static_cast<DuckLakeBranchParseData &>(*parse_data);
+	auto catalog_name = DatabaseManager::GetDefaultDatabase(context);
 
 	ParserExtensionPlanResult result;
 	result.parameters.push_back(Value(catalog_name));
