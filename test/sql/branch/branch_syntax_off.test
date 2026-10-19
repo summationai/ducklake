@@ -1,0 +1,111 @@
+# name: test/sql/branch/branch_syntax_off.test
+# description: With DUCKLAKE_BRANCH_SYNTAX=off the branch syntax is gone, nothing runs hidden behind it, and the functions still branch
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+require-env DUCKLAKE_BRANCH_SYNTAX off
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_syntax_off_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE prices(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO prices VALUES ('Jacket', 100), ('Boots', 80)
+
+# none of the four statements parses
+
+statement error
+CREATE BRANCH analysis
+----
+Parser Error
+
+statement error
+SET BRANCH main
+----
+Parser Error
+
+statement error
+MERGE BRANCH analysis ON CONFLICT KEEP BRANCH
+----
+Parser Error
+
+statement error
+DROP BRANCH IF EXISTS analysis
+----
+Parser Error
+
+# a statement behind one doesn't run either: the whole query is a syntax error
+
+statement error
+SET BRANCH main; ATTACH ':memory:' AS hidden_after
+----
+Parser Error
+
+statement error
+ATTACH ':memory:' AS hidden_before; SET BRANCH main
+----
+Parser Error
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name IN ('hidden_after', 'hidden_before')
+----
+0
+
+# the functions still branch: create, switch, change, merge, drop
+
+query II
+CALL ducklake_create_branch('ducklake', 'analysis')
+----
+analysis	2
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'analysis')
+
+query I
+FROM ducklake_current_branch('ducklake')
+----
+analysis
+
+statement ok
+UPDATE prices SET price = 90 WHERE item = 'Boots'
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	80
+Jacket	100
+
+statement ok
+CALL ducklake_merge_branch('ducklake', 'analysis')
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	90
+Jacket	100
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'scratch')
+
+statement ok
+CALL ducklake_drop_branch('ducklake', 'scratch')
+
+query I
+SELECT count(*) FROM ducklake_branches('ducklake') WHERE branch_name = 'scratch'
+----
+0
