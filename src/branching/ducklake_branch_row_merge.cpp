@@ -37,7 +37,8 @@ SnapshotChangeInformation DuckLakeBranchManager::MainChangesSince(DuckLakeTransa
 		return result;
 	};
 	SnapshotAndStats snapshot_and_stats;
-	auto changes = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor);
+	auto changes = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(
+	    snapshot_and_stats, executor, transaction.GetCatalog().SupportsV1_1Metadata());
 	return SnapshotChangeInformation::ParseChangesMade(changes.changes_made);
 }
 
@@ -132,16 +133,21 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		if (Contains(renamed_on_main, table_id) || !entry) {
 			continue;
 		}
+		auto &schema = entry->ParentSchema().Cast<DuckLakeSchemaEntry>();
+		if (schema.ParentDuckLakeSchema()) {
+			// tables in nested schemas keep the table-level rules
+			continue;
+		}
 		DuckLakeRowMergeTable table;
 		table.table_id = table_id;
-		table.schema_name = entry->ParentSchema().name;
-		table.main_name = entry->name;
+		table.schema_name = schema.name.GetIdentifierName();
+		table.main_name = entry->name.GetIdentifierName();
 		table.branch_name = table.main_name;
 		// a table renamed on the branch is read there under its new name; one whose columns the branch changed is
 		// compared on the branch's columns
 		auto local_version = LocalTableVersion(transaction, table_id);
 		if (local_version) {
-			table.branch_name = local_version->name;
+			table.branch_name = local_version->name.GetIdentifierName();
 			ProjectColumns(*local_version, entry->Cast<DuckLakeTableEntry>(), table.branch_columns, table.main_columns);
 		}
 		result.emplace(table_id, std::move(table));
@@ -157,7 +163,7 @@ void DuckLakeBranchManager::ProjectColumns(const DuckLakeTableEntry &branch_vers
 	bool same = branch_version.GetColumns().LogicalColumnCount() == main_version.GetColumns().LogicalColumnCount();
 	for (auto &column : branch_version.GetColumns().Logical()) {
 		auto &field = branch_fields.GetByRootIndex(column.Physical());
-		branch_columns.push_back(DuckLakeUtil::SQLIdentifierToString(column.Name()));
+		branch_columns.push_back(DuckLakeUtil::SQLIdentifierToString(column.Name().GetIdentifierName()));
 		auto main_field = main_fields.GetByFieldIndex(field.GetFieldIndex());
 		if (main_field) {
 			main_columns.push_back(DuckLakeUtil::SQLIdentifierToString(main_field->Name()));
@@ -393,12 +399,14 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 	for (auto &entry : merge.row_merge) {
 		auto &table = entry.second;
 		if (!table.conflicts.empty()) {
-			throw TransactionException(RowConflictMessage(catalog.GetName(), merge.loaded.info.name, table));
+			throw TransactionException(
+			    RowConflictMessage(catalog.GetName().GetIdentifierName(), merge.loaded.info.name, table));
 		}
 		auto table_entry = GetTableEntry(transaction, merge.head_snapshot, table.table_id);
 		auto &table_data = table_entry->Cast<DuckLakeTableEntry>();
 		auto &schema = table_data.ParentSchema().Cast<DuckLakeSchemaEntry>();
-		bool use_deletion_vectors = catalog.WriteDeletionVectors(schema.GetSchemaId(), table.table_id);
+		bool use_deletion_vectors =
+		    catalog.WriteDeletionVectors(schema.GetSchemaId(), table.table_id, &table_data.GetTableOptions());
 		// what to change, read under the lock: the files themselves are read and written outside it
 		struct BranchFileDrop {
 			string data_file;
@@ -416,13 +424,10 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 				continue;
 			}
 			// main deleted every row both sides touched: the branch's deletes of inlined ones would repeat main's
-			auto &inlined_deletes = changes->second.new_inlined_data_deletes;
-			for (auto inlined = inlined_deletes.begin(); inlined != inlined_deletes.end();) {
+			for (auto &inlined : changes->second.new_inlined_data_deletes) {
 				for (auto &row_id : table.overlap) {
-					inlined->second->rows.erase(static_cast<idx_t>(row_id));
+					inlined.second->rows.erase(static_cast<idx_t>(row_id));
 				}
-				// an empty set would be written as an empty list
-				inlined = inlined->second->rows.empty() ? inlined_deletes.erase(inlined) : std::next(inlined);
 			}
 			for (auto &file_rows : table.branch_rows_to_drop) {
 				BranchFileDrop drop;
@@ -467,7 +472,8 @@ void DuckLakeBranchManager::ApplyRowMerge(DuckLakeTransaction &transaction, Duck
 			                            drop.data_file,
 			                            std::move(drop.positions),
 			                            DeleteFileSource::REGULAR};
-			written_files.emplace_back(drop.data_file, WriteBranchDeleteFile(context, input, use_deletion_vectors));
+			written_files.emplace_back(drop.data_file,
+			                           DuckLakeDeleteFileWriter::Write(context, input, use_deletion_vectors));
 		}
 		for (auto &written : written_files) {
 			local_changes.TransactionLocalDelete(context, table.table_id, written.first, std::move(written.second));
@@ -480,6 +486,7 @@ void DuckLakeBranchManager::ExcludeFromInsertDeleteRules(TableIndex table_id, Tr
 	// through the checks that kept them out of the row-by-row merge, and CheckRowMergeTablesUnchanged
 	changes.tables_inserted_into.erase(table_id);
 	changes.tables_deleted_from.erase(table_id);
+	changes.tables_delete_attempted.erase(table_id);
 	changes.tables_inserted_inlined.erase(table_id);
 	changes.tables_deleted_inlined.erase(table_id);
 }

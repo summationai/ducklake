@@ -16,7 +16,7 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | Upstream file | Function | Call | What it does |
 | --- | --- | --- | --- |
 | `src/CMakeLists.txt` | | `add_subdirectory(branching)` | builds `src/branching/` |
-| `src/ducklake_extension.cpp` | `LoadInternal`, at the end | `Register(loader, config)` | the branch functions and the `CREATE/SET/DROP/MERGE BRANCH` parser extension |
+| `src/ducklake_extension.cpp` | `LoadInternal`, at the end | `Register(loader, config)` | the branch functions and, unless `DUCKLAKE_BRANCH_SYNTAX=off`, the `CREATE/SET/DROP/MERGE BRANCH` parser extension |
 | `src/storage/ducklake_transaction_manager.cpp` | `StartTransaction`, after `Start()` | `OnTransactionStart(*transaction, context)` | puts the transaction on the connection's selected branch |
 | | same, the immediate-mode condition | `&& !IsOnBranch(*transaction)` | a branch is loaded on first use, not at transaction start |
 | `src/storage/ducklake_transaction.cpp` | `GetSnapshot()`, at entry | `TryGetSnapshot(*this, branch_snapshot)` | a branch reads main at its fork, with the branch's changes loaded |
@@ -137,19 +137,6 @@ It adds no call site. After a rebase, check:
   transaction reads it.
 - `ducklake_files_scheduled_for_deletion` accepts branch file ids, and `ducklake_cleanup_old_files` removes those files,
   as for `DROP BRANCH`.
-
-## The DuckLake v1.5 build (branch `release/v1.5-branching`)
-
-The branching code from `feature/branching-close` (b170684b) ported onto DuckLake `ac7595b0` (`v1.5-variegata`, the DuckLake of DuckDB v1.5.6), for engines that embed DuckDB 1.5.6, such as GizmoSQL v1.40 and later.
-
-- **Call sites:** the same calls into `DuckLakeBranching`, plus one in `PlanCreateTableAs` (`ducklake_insert.cpp`): 1.5 decides inlining for `CREATE TABLE AS` outside `GetInliningLimit`. The global-stats check is in `DuckLakeGetPartitionStats` and `DuckLakeTableEntry::GetTableStats`, and `AddKnownFiles` takes 1.5's `vector<string>` of known files.
-- **Upstream fixes backported** from DuckLake main, each needed by a branch test:
-  - `DuckLakeCatalog::IsInitialized` in the immediate-transaction-mode check: attaching with `immediate_transaction_mode` failed;
-  - the compaction table lookup at the start of its schema version: it cached a later catalog under an older schema version;
-  - `HandleRenameOldEntry`: renaming a table altered earlier in the same transaction failed;
-  - 4e283cd5: rename against a concurrent drop or alter is a conflict.
-- **Not in 1.5, so left out:** nested schemas, the `DUCKLAKE_VERSION` attach option (and the `ducklake_version` test config), `CREATE TABLE ... PARTITIONED BY / SORTED BY / WITH` (refused by DuckLake 1.5 itself), and the conflict for a delete that matched no rows (`tables_delete_attempted`).
-- **Deletion vectors:** DuckLake 1.5 deletion vectors keep no per-row snapshots, so a branch reads main's deletes before its fork wrongly once main rewrites them, as plain 1.5 time travel does. Four branch tests are skipped in `test/configs/deletion_vectors.json` for that reason; deletion vectors are off by default.
 
 ## After a rebase
 

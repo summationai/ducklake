@@ -3,7 +3,9 @@
 #include "branching/ducklake_branch.hpp"
 #include "branching/ducklake_branch_functions.hpp"
 #include "branching/ducklake_branch_parser.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parser_extension.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
@@ -14,7 +16,24 @@
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_transaction_state.hpp"
 
+#include <cstdlib>
+
 namespace duckdb {
+
+// CREATE/DROP/MERGE/SET BRANCH are a parser extension, SQL only a server with this extension can read. A server
+// that vets SQL with a parser that doesn't know them (GizmoSQL's admin-command check) can be passed by a statement
+// hidden behind one, so such a server sets DUCKLAKE_BRANCH_SYNTAX=off and branches with the ducklake_*_branch
+// functions. Read once, at load, so no SQL can turn it back on. Any other value fails the load rather than guess.
+static bool BranchSyntaxEnabled() {
+	auto value = std::getenv("DUCKLAKE_BRANCH_SYNTAX");
+	if (!value || StringUtil::CIEquals(value, "on")) {
+		return true;
+	}
+	if (StringUtil::CIEquals(value, "off")) {
+		return false;
+	}
+	throw InvalidInputException("DUCKLAKE_BRANCH_SYNTAX must be \"on\" or \"off\", not \"%s\"", value);
+}
 
 void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetCreateBranchFunction());
@@ -27,7 +46,9 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(current_branch);
 	DuckLakeBranchesFunction branches;
 	loader.RegisterFunction(branches);
-	ParserExtension::Register(config, DuckLakeBranchParserExtension());
+	if (BranchSyntaxEnabled()) {
+		ParserExtension::Register(config, DuckLakeBranchParserExtension());
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -36,6 +57,9 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 void DuckLakeBranching::OnTransactionStart(DuckLakeTransaction &transaction, ClientContext &context) {
 	auto &catalog = transaction.GetCatalog();
 	if (!catalog.IsInitialized() || catalog.CatalogSnapshot()) {
+		return;
+	}
+	if (context.registered_state->Get<DuckLakeInternalConnectionState>(DuckLakeInternalConnectionState::KEY)) {
 		return;
 	}
 	auto branch_state = context.registered_state->Get<DuckLakeBranchState>(DuckLakeBranchState::KEY);
@@ -240,10 +264,12 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 		return false;
 	}
 	auto newest_fork = *std::max_element(forks.begin(), forks.end());
-	auto result = transaction.Query(StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d "
-	                                                   "AND (end_snapshot IS NULL OR end_snapshot > %d) "
-	                                                   "LIMIT 1",
-	                                                   inlined_table.table_name, newest_fork, newest_fork));
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto col_names = metadata_manager.InlinedColNames();
+	auto result = metadata_manager.Query(
+	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d AND (%s IS NULL OR %s > %d) LIMIT 1",
+	                       inlined_table.table_name, col_names.begin_snapshot, newest_fork, col_names.end_snapshot,
+	                       col_names.end_snapshot, newest_fork));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
 	}
@@ -254,17 +280,18 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 	return false;
 }
 
-void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, vector<string> &known_files) {
+void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, unordered_set<string> &known_files,
+                                      const std::function<string(const string &)> &canonical_path) {
 	if (!DuckLakeBranchManager::HasBranchTables(transaction)) {
 		return;
 	}
 	// files written on active branches are not listed in the main file tables
-	auto result = transaction.Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
+	auto result = transaction.GetMetadataManager().Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to get branch files from DuckLake: ");
 	}
 	for (auto &row : *result) {
-		known_files.push_back(row.GetValue<string>(0));
+		known_files.insert(canonical_path(row.GetValue<string>(0)));
 	}
 }
 
