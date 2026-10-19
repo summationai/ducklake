@@ -15,9 +15,11 @@ namespace duckdb {
 class DuckLakeBranchFunctions {
 public:
 	static TableFunction GetCreateBranchFunction();
-	static TableFunction GetDropBranchFunction();
+	//! if_exists_positional: DROP BRANCH IF EXISTS passes the flag as a third positional argument
+	static TableFunction GetDropBranchFunction(bool if_exists_positional = false);
 	static TableFunction GetSetBranchFunction();
-	static TableFunction GetMergeBranchFunction();
+	//! on_conflict_positional: MERGE BRANCH ... ON CONFLICT KEEP passes it as a third positional argument
+	static TableFunction GetMergeBranchFunction(bool on_conflict_positional = false);
 	static TableFunction GetBranchTableFunction();
 	static TableFunction GetCloseStaleBranchesFunction();
 };
