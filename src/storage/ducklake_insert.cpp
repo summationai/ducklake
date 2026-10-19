@@ -132,6 +132,9 @@ DuckLakeColumnStats DuckLakeInsert::ParseColumnStats(const LogicalType &type, co
 			column_stats.min_is_exact = StringValue::Get(stats_children[1]) == "true";
 		} else if (stats_name == "max_is_exact") {
 			column_stats.max_is_exact = StringValue::Get(stats_children[1]) == "true";
+		} else if (stats_name == "nan_count") {
+			// NaN count of floating point columns; contains_nan is already set from has_nan
+			continue;
 		} else if (column_stats.extra_stats && column_stats.extra_stats->ParseStats(stats_name, stats_children)) {
 			// handled by extra stats
 			continue;
@@ -321,7 +324,7 @@ CopyFunctionCatalogEntry &DuckLakeFunctions::GetCopyFunction(ClientContext &cont
 	auto &db = *context.db;
 	string extension_name = ExtensionHelper::FindExtensionInEntries(name, EXTENSION_COPY_FUNCTIONS);
 	if (!extension_name.empty() && Settings::Get<AutoloadKnownExtensionsSetting>(context) &&
-	    ExtensionHelper::CanAutoloadExtension(extension_name)) {
+	    ExtensionHelper::CanAutoloadExtension(db, extension_name)) {
 		// This will either succeed or throw
 		ExtensionHelper::AutoLoadExtension(db, extension_name);
 	}

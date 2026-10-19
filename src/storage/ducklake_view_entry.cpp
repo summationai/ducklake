@@ -134,7 +134,7 @@ unique_ptr<CatalogEntry> DuckLakeViewEntry::Copy(ClientContext &context) const {
 }
 
 unique_ptr<SelectStatement> DuckLakeViewEntry::ParseSelectStatement() const {
-	Parser parser;
+	auto parser = Parser::GetBuiltinParser();
 	// switcharoo of generic {DUCKLAKE_CATALOG}. with actual catalog name
 	auto resolved_sql = DuckLakeUtil::ReplaceSkippingQuotes(query_sql, "{DUCKLAKE_CATALOG}.", catalog.GetName() + ".");
 	parser.ParseQuery(resolved_sql);

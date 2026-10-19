@@ -444,7 +444,7 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 			if (col.default_value_type == "literal") {
 				col_data.default_value = ConstantExpression::FromValue(col.default_value);
 			} else if (col.default_value_type == "expression") {
-				auto sql_expr = Parser::ParseExpressionList(col.default_value.GetValue<string>());
+				auto sql_expr = Parser::GetBuiltinParser().ParseExpressionList(col.default_value.GetValue<string>());
 				if (sql_expr.size() != 1) {
 					throw InternalException("Expected a single expression");
 				}
@@ -514,13 +514,13 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 	for (auto &impl : macro.implementations) {
 		unique_ptr<MacroFunction> macro_function;
 		if (impl.type == "scalar") {
-			auto sql_expr = Parser::ParseExpressionList(impl.sql);
+			auto sql_expr = Parser::GetBuiltinParser().ParseExpressionList(impl.sql);
 			if (sql_expr.size() != 1) {
 				throw InternalException("Expected a single expression");
 			}
 			macro_function = make_uniq<ScalarMacroFunction>(std::move(sql_expr[0]));
 		} else if (impl.type == "table") {
-			Parser parser;
+			auto parser = Parser::GetBuiltinParser();
 			parser.ParseQuery(impl.sql);
 			if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 				throw InternalException("Expected a single select statement");
@@ -532,7 +532,7 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, 
 		}
 		vector<unique_ptr<ParsedExpression>> expr_list;
 		for (auto &param : impl.parameters) {
-			expr_list = Parser::ParseExpressionList(param.default_value.ToSQLString());
+			expr_list = Parser::GetBuiltinParser().ParseExpressionList(param.default_value.ToSQLString());
 			if (expr_list.size() != 1) {
 				throw InternalException("Expected a single expression");
 			}

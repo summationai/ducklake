@@ -40,7 +40,7 @@ string DuckLakeSort::BuildSortOrderSQL(const DuckLakeSort &sort_data, const Colu
 		if (rename_map.empty()) {
 			result += field.expression;
 		} else {
-			auto parsed = Parser::ParseExpressionList(field.expression);
+			auto parsed = Parser::GetBuiltinParser().ParseExpressionList(field.expression);
 			D_ASSERT(parsed.size() == 1);
 			ParsedExpressionIterator::VisitExpressionMutable<ColumnRefExpression>(
 			    *parsed[0], [&](ColumnRefExpression &colref) {

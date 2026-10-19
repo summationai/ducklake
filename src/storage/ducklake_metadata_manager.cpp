@@ -2977,7 +2977,7 @@ static void ColumnToSQLRecursive(const DuckLakeColumnInfo &column, TableIndex ta
 			if (value.empty()) {
 				default_val = "''";
 			} else {
-				auto sql_expr = Parser::ParseExpressionList(column.default_value.GetValue<string>());
+				auto sql_expr = Parser::GetBuiltinParser().ParseExpressionList(column.default_value.GetValue<string>());
 				if (sql_expr.size() != 1) {
 					throw InternalException("Expected a single expression");
 				}
@@ -3360,7 +3360,7 @@ static unique_ptr<SQLStatement> InlinedDataInsert(DuckLakeTransaction &transacti
 		projections.push_back(std::move(expression));
 	}
 	auto select = make_uniq<SelectNode>();
-	select->select_list = Parser::ParseExpressionList(StringUtil::Join(projections, ", "));
+	select->select_list = Parser::GetBuiltinParser().ParseExpressionList(StringUtil::Join(projections, ", "));
 	select->from_table = make_uniq<ColumnDataRef>(std::move(input));
 	select->from_table->alias = "inlined_data";
 	auto statement = make_uniq<InsertStatement>();
