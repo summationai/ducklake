@@ -3,7 +3,9 @@
 #include "branching/ducklake_branch.hpp"
 #include "branching/ducklake_branch_functions.hpp"
 #include "branching/ducklake_branch_parser.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parser_extension.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
@@ -14,7 +16,24 @@
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_transaction_state.hpp"
 
+#include <cstdlib>
+
 namespace duckdb {
+
+// CREATE/DROP/MERGE/SET BRANCH are a parser extension, SQL only a server with this extension can read. A server
+// that vets SQL with a parser that doesn't know them (GizmoSQL's admin-command check) can be passed by a statement
+// hidden behind one, so such a server sets DUCKLAKE_BRANCH_SYNTAX=off and branches with the ducklake_*_branch
+// functions. Read once, at load, so no SQL can turn it back on. Any other value fails the load rather than guess.
+static bool BranchSyntaxEnabled() {
+	auto value = std::getenv("DUCKLAKE_BRANCH_SYNTAX");
+	if (!value || StringUtil::CIEquals(value, "on")) {
+		return true;
+	}
+	if (StringUtil::CIEquals(value, "off")) {
+		return false;
+	}
+	throw InvalidInputException("DUCKLAKE_BRANCH_SYNTAX must be \"on\" or \"off\", not \"%s\"", value);
+}
 
 void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetCreateBranchFunction());
@@ -27,7 +46,9 @@ void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(current_branch);
 	DuckLakeBranchesFunction branches;
 	loader.RegisterFunction(branches);
-	ParserExtension::Register(config, DuckLakeBranchParserExtension());
+	if (BranchSyntaxEnabled()) {
+		ParserExtension::Register(config, DuckLakeBranchParserExtension());
+	}
 }
 
 //===--------------------------------------------------------------------===//
