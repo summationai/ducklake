@@ -6,9 +6,11 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parser_extension.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_metadata_info.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
+#include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_transaction_state.hpp"
 
@@ -150,6 +152,19 @@ idx_t DuckLakeBranching::InliningLimit(DuckLakeTransaction &transaction, idx_t l
 
 bool DuckLakeBranching::CanUseGlobalStats(DuckLakeTransaction &transaction) {
 	return !IsOnBranch(transaction);
+}
+
+unique_ptr<NodeStatistics> DuckLakeBranching::BranchCardinality(ClientContext &context, DuckLakeTableEntry &table) {
+	auto &transaction = DuckLakeTransaction::Get(context, table.ParentCatalog());
+	if (!IsOnBranch(transaction)) {
+		return nullptr;
+	}
+	// a table the branch created has no main stats
+	auto stats = table.ParentCatalog().Cast<DuckLakeCatalog>().GetTableStats(transaction, table.GetTableId());
+	if (!stats) {
+		return nullptr;
+	}
+	return make_uniq<NodeStatistics>(stats->record_count);
 }
 
 bool DuckLakeBranching::TryFlushDelete(const DuckLakeDelete &op, DuckLakeTransaction &transaction,
