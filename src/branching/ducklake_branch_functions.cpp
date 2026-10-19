@@ -106,7 +106,8 @@ static void CreateBranchExecute(ClientContext &context, TableFunctionInput &data
 TableFunction DuckLakeBranchFunctions::GetCreateBranchFunction() {
 	TableFunction function("ducklake_create_branch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, CreateBranchExecute,
 	                       CreateBranchBind, DuckLakeBranchFunctionInit);
-	function.named_parameters["from_branch"] = LogicalType::VARCHAR;
+	function.GetSignature().WithTypedKwargs("options",
+	                                        [](TypedKwargs &options) { options.Add("from_branch", LogicalType::VARCHAR); });
 	return function;
 }
 
@@ -155,10 +156,15 @@ static void DropBranchExecute(ClientContext &context, TableFunctionInput &data_p
 	state.finished = true;
 }
 
-TableFunction DuckLakeBranchFunctions::GetDropBranchFunction() {
-	TableFunction function("ducklake_drop_branch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, DropBranchExecute,
-	                       DropBranchBind, DuckLakeBranchFunctionInit);
-	function.named_parameters["if_exists"] = LogicalType::BOOLEAN;
+TableFunction DuckLakeBranchFunctions::GetDropBranchFunction(bool if_exists_positional) {
+	vector<LogicalType> arguments {LogicalType::VARCHAR, LogicalType::VARCHAR};
+	if (if_exists_positional) {
+		arguments.push_back(LogicalType::BOOLEAN);
+	}
+	TableFunction function("ducklake_drop_branch", arguments, DropBranchExecute, DropBranchBind,
+	                       DuckLakeBranchFunctionInit);
+	function.GetSignature().WithTypedKwargs("options",
+	                                        [](TypedKwargs &options) { options.Add("if_exists", LogicalType::BOOLEAN); });
 	return function;
 }
 
@@ -483,20 +489,26 @@ static void BranchTableExecute(ClientContext &context, TableFunctionInput &data_
 TableFunction DuckLakeBranchFunctions::GetBranchTableFunction() {
 	TableFunction function("ducklake_branch_table", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                       BranchTableExecute, BranchTableBind, BranchTableInit);
-	function.named_parameters["schema"] = LogicalType::VARCHAR;
+	function.GetSignature().WithTypedKwargs("options",
+	                                        [](TypedKwargs &options) { options.Add("schema", LogicalType::VARCHAR); });
 	return function;
 }
 
-TableFunction DuckLakeBranchFunctions::GetMergeBranchFunction() {
-	TableFunction function("ducklake_merge_branch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MergeBranchExecute,
-	                       MergeBranchBind, MergeBranchInit);
-	function.named_parameters["author"] = LogicalType::VARCHAR;
-	function.named_parameters["message"] = LogicalType::VARCHAR;
-	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
-	function.named_parameters["table_name"] = LogicalType::VARCHAR;
-	function.named_parameters["schema"] = LogicalType::VARCHAR;
-	function.named_parameters["on_conflict"] = LogicalType::VARCHAR;
-	function.named_parameters["conflicts_only"] = LogicalType::BOOLEAN;
+TableFunction DuckLakeBranchFunctions::GetMergeBranchFunction(bool on_conflict_positional) {
+	vector<LogicalType> arguments {LogicalType::VARCHAR, LogicalType::VARCHAR};
+	if (on_conflict_positional) {
+		arguments.push_back(LogicalType::VARCHAR);
+	}
+	TableFunction function("ducklake_merge_branch", arguments, MergeBranchExecute, MergeBranchBind, MergeBranchInit);
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("author", LogicalType::VARCHAR)
+		    .Add("message", LogicalType::VARCHAR)
+		    .Add("dry_run", LogicalType::BOOLEAN)
+		    .Add("table_name", LogicalType::VARCHAR)
+		    .Add("schema", LogicalType::VARCHAR)
+		    .Add("on_conflict", LogicalType::VARCHAR)
+		    .Add("conflicts_only", LogicalType::BOOLEAN);
+	});
 	return function;
 }
 
@@ -588,9 +600,11 @@ static void CloseStaleExecute(ClientContext &context, TableFunctionInput &data_p
 TableFunction DuckLakeBranchFunctions::GetCloseStaleBranchesFunction() {
 	TableFunction function("ducklake_close_stale_branches", {LogicalType::VARCHAR}, CloseStaleExecute, CloseStaleBind,
 	                       CloseStaleInit);
-	function.named_parameters["older_than"] = LogicalType::TIMESTAMP_TZ;
-	function.named_parameters["dry_run"] = LogicalType::BOOLEAN;
-	function.named_parameters["archive_schema"] = LogicalType::VARCHAR;
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("older_than", LogicalType::TIMESTAMP_TZ)
+		    .Add("dry_run", LogicalType::BOOLEAN)
+		    .Add("archive_schema", LogicalType::VARCHAR);
+	});
 	return function;
 }
 
