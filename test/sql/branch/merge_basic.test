@@ -144,14 +144,15 @@ insert	Hat
 update_postimage	Jacket
 update_preimage	Jacket
 
-# stats are right after the merge, and every merged file carries full per-column stats
+# stats are right after the merge, and every merged file carries full per-column stats (a struct's own row has no
+# bytes of its own, in files written on main too, so only leaf columns are checked)
 query IIIII
 SELECT COUNT(*), MIN(price), MAX(price), MIN(item), MAX(item) FROM prices
 ----
 3	25	110	Boots	Jacket
 
 query I
-SELECT COUNT(*) FROM ducklake_meta.ducklake_file_column_stats s JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.begin_snapshot = 6 AND (s.column_size_bytes IS NULL OR s.column_size_bytes = 0 OR s.value_count IS NULL)
+SELECT COUNT(*) FROM ducklake_meta.ducklake_file_column_stats s JOIN ducklake_meta.ducklake_data_file f USING (data_file_id) WHERE f.begin_snapshot = 6 AND (s.column_size_bytes IS NULL OR s.column_size_bytes = 0 OR s.value_count IS NULL) AND s.column_id NOT IN (SELECT parent_column FROM ducklake_meta.ducklake_column WHERE parent_column IS NOT NULL)
 ----
 0
 
