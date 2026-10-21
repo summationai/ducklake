@@ -21,6 +21,15 @@ ifeq (${BUILD_EXTENSION_TEST_DEPS}, full)
 	USE_MERGED_VCPKG_MANIFEST:=1
 endif
 
+# The DuckDB this line builds against (.github/duckdb-version, commit b15358c3) is the
+# one GizmoSQL's edge channel embeds, built as v2.0.0-alpha46057. DuckDB 2.0 takes its
+# version from this override (or DUCKDB_VERSION), never from git describe: without it
+# a commit checkout is v2.0.0-dev<count>, the extension's footer says b15358c371 and
+# that server refuses it. The toolchain passes this to CMake as -DOVERRIDE_GIT_DESCRIBE.
+ifeq ($(strip $(OVERRIDE_GIT_DESCRIBE)),)
+OVERRIDE_GIT_DESCRIBE := v2.0.0-alpha46057
+endif
+
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 

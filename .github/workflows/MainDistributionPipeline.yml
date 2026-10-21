@@ -33,10 +33,8 @@ jobs:
       # Temporary override; remove when extension-ci-tools updates its default.
       vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
       extension_name: ducklake
-      # DuckDB stamps extensions with its own version string and refuses any other. A commit checkout describes
-      # as v1.5.1-17111-gb15358c371d (and this toolchain then stamps the bare hash), while GizmoSQL edge's DuckDB
-      # reports v2.0.0-alpha46057: this tags the checked-out commit so the stamp matches the server.
-      duckdb_tag: v2.0.0-alpha46057
+      # The DuckDB version the build is stamped with (v2.0.0-alpha46057, which the edge server checks) is set
+      # in the Makefile: duckdb_tag does nothing on DuckDB 2.0, which never consults git describe.
       # only linux_arm64, what agc-lake's Graviton node runs; this build runs no tests, so the full suite is
       # run locally before a build is tagged
       exclude_archs: "linux_amd64;linux_amd64_musl;osx_amd64;osx_arm64;wasm_eh;wasm_mvp;wasm_threads;windows_amd64;windows_amd64_mingw;windows_arm64"
