@@ -14,6 +14,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "storage/ducklake_catalog_set.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_stats.hpp"
@@ -274,6 +275,9 @@ public:
 
 	//! Invalidate the cached table stats entry for a given stats cache key.
 	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id);
+	//! Invalidate every cached table stats entry created for the given next_file_id values (the snapshots
+	//! being expired). Only the entries this catalog actually put in the cache are visited.
+	void InvalidateTableStatsCache(const vector<idx_t> &next_file_ids);
 	//! Invalidate the cached schema entry for a given schema_version.
 	void InvalidateSchemaCache(idx_t schema_version);
 
@@ -292,6 +296,10 @@ private:
 	ObjectCache &GetObjectCacheInstance();
 
 private:
+	//! The table stats entries this catalog has put in the ObjectCache, next_file_id -> table ids, so that
+	//! snapshot expiry can evict them without probing every (snapshot, table) combination
+	mutex stats_cache_lock;
+	unordered_map<idx_t, unordered_set<idx_t>> cached_stats_keys;
 	mutex name_maps_lock;
 	//! Map of mapping index -> name map
 	DuckLakeNameMapSet name_maps;

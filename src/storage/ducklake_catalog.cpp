@@ -822,6 +822,10 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 	}
 
 	auto entry = make_shared_ptr<DuckLakeTableStatsCacheEntry>(snapshot.schema_version, std::move(*table_stats));
+	{
+		lock_guard<mutex> guard(stats_cache_lock);
+		cached_stats_keys[snapshot.next_file_id].insert(table_id.index);
+	}
 	cache.Put(std::move(key), entry);
 	auto *raw = entry.get();
 	return shared_ptr<DuckLakeTableStats>(std::move(entry), &raw->stats);
@@ -1086,7 +1090,38 @@ string DuckLakeCatalog::SchemaCacheKey(idx_t schema_version) const {
 }
 
 void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id) {
+	{
+		lock_guard<mutex> guard(stats_cache_lock);
+		auto entry = cached_stats_keys.find(next_file_id);
+		if (entry != cached_stats_keys.end()) {
+			entry->second.erase(table_id.index);
+			if (entry->second.empty()) {
+				cached_stats_keys.erase(entry);
+			}
+		}
+	}
 	GetObjectCacheInstance().Delete(StatsCacheKey(next_file_id, table_id));
+}
+
+void DuckLakeCatalog::InvalidateTableStatsCache(const vector<idx_t> &next_file_ids) {
+	vector<string> keys;
+	{
+		lock_guard<mutex> guard(stats_cache_lock);
+		for (auto next_file_id : next_file_ids) {
+			auto entry = cached_stats_keys.find(next_file_id);
+			if (entry == cached_stats_keys.end()) {
+				continue;
+			}
+			for (auto table_id : entry->second) {
+				keys.push_back(StatsCacheKey(next_file_id, TableIndex(table_id)));
+			}
+			cached_stats_keys.erase(entry);
+		}
+	}
+	auto &cache = GetObjectCacheInstance();
+	for (auto &key : keys) {
+		cache.Delete(key);
+	}
 }
 
 void DuckLakeCatalog::InvalidateSchemaCache(idx_t schema_version) {
