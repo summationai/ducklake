@@ -1,0 +1,109 @@
+# name: test/sql/issues/expire_snapshots_stats_cache_many_tables.test
+# description: ducklake_expire_snapshots evicts only the table stats cache entries that exist, not every snapshot x table pair
+# group: [issues]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/expire_stats_cache_many_tables', DATA_INLINING_ROW_LIMIT 0)
+
+# Many tables, each with a stats row, created in one snapshot.
+statement ok
+BEGIN
+
+loop i 0 200
+
+statement ok
+CREATE TABLE ducklake.t${i} AS SELECT ${i} AS v
+
+endloop
+
+statement ok
+COMMIT
+
+# Many snapshots: one single-row insert each, so every snapshot has its own next_file_id.
+loop i 0 100
+
+statement ok
+INSERT INTO ducklake.t0 VALUES (${i})
+
+endloop
+
+# Cache the stats of a few tables at the latest snapshot.
+statement ok
+CREATE TEMP TABLE baseline AS SELECT memory_usage_bytes AS bytes FROM duckdb_memory() WHERE tag = 'OBJECT_CACHE'
+
+statement ok
+SELECT * FROM ducklake.t0 WHERE v = 5
+
+statement ok
+SELECT * FROM ducklake.t1 WHERE v = 1
+
+statement ok
+SELECT * FROM ducklake.t199 WHERE v = 199
+
+query I
+SELECT (SELECT memory_usage_bytes FROM duckdb_memory() WHERE tag = 'OBJECT_CACHE') > (SELECT bytes FROM baseline)
+----
+true
+
+# One more snapshot so the cached entries belong to a snapshot that will be expired.
+statement ok
+INSERT INTO ducklake.t0 VALUES (1000)
+
+query I
+SELECT count(*) > 100 FROM ducklake.snapshots()
+----
+true
+
+statement ok
+CREATE TEMP TABLE cached AS SELECT memory_usage_bytes AS bytes FROM duckdb_memory() WHERE tag = 'OBJECT_CACHE'
+
+# Expire everything but the latest snapshot: 100+ snapshots x 200 tables.
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => now())
+
+query I
+SELECT count(*) FROM ducklake.snapshots()
+----
+1
+
+# The cached entries of the expired snapshots are gone.
+query I
+SELECT (SELECT memory_usage_bytes FROM duckdb_memory() WHERE tag = 'OBJECT_CACHE') < (SELECT bytes FROM cached)
+----
+true
+
+# Stats and data of the surviving snapshot are intact.
+query II
+SELECT count(*), max(v) FROM ducklake.t0
+----
+102	1000
+
+query I
+SELECT v FROM ducklake.t199
+----
+199
+
+statement ok
+INSERT INTO ducklake.t1 VALUES (2)
+
+query II
+SELECT min(v), max(v) FROM ducklake.t1
+----
+1	2
+
+# A second expire with nothing cached for the expired snapshots is a no-op for the cache.
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => now())
+
+query I
+SELECT count(*) FROM ducklake.snapshots()
+----
+1

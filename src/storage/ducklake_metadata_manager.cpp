@@ -4811,15 +4811,6 @@ void DuckLakeMetadataManager::DeleteSnapshots(const vector<DuckLakeSnapshotInfo>
 		snapshot_ids += to_string(snapshot.id);
 	}
 
-	vector<TableIndex> stats_table_ids;
-	result = transaction.Query("SELECT DISTINCT table_id FROM {METADATA_CATALOG}.ducklake_table_stats;");
-	if (result->HasError()) {
-		result->GetErrorObject().Throw("Failed to list table stats for cache invalidation in DuckLake: ");
-	}
-	for (auto &row : *result) {
-		stats_table_ids.push_back(TableIndex(row.GetValue<idx_t>(0)));
-	}
-
 	vector<string> tables_to_delete_from {"ducklake_snapshot", "ducklake_snapshot_changes"};
 	for (auto &delete_tbl : tables_to_delete_from) {
 		result = transaction.Query(StringUtil::Format(R"(
@@ -5083,12 +5074,14 @@ WHERE NOT EXISTS (
 		}
 	}
 
-	auto &catalog = transaction.GetCatalog();
+	// evict the cached table stats of the expired snapshots - only the entries that were actually cached are
+	// touched (see DuckLakeCatalog::GetTableStats), not every (snapshot, table) combination
+	vector<idx_t> next_file_ids;
+	next_file_ids.reserve(snapshots.size());
 	for (auto &snapshot : snapshots) {
-		for (auto &table_id : stats_table_ids) {
-			catalog.InvalidateTableStatsCache(snapshot.next_file_id, table_id);
-		}
+		next_file_ids.push_back(snapshot.next_file_id);
 	}
+	transaction.GetCatalog().InvalidateTableStatsCache(next_file_ids);
 }
 
 void DuckLakeMetadataManager::DeleteInlinedData(const DuckLakeInlinedTableInfo &inlined_table) {
