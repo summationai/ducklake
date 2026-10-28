@@ -27,14 +27,14 @@ unique_ptr<Connection> BranchSqlConnection(ClientContext &context, const string 
                                            const string &branch_name) {
 	auto connection = make_uniq<Connection>(*context.db);
 	RunBranchSql(*connection,
-	             StringUtil::Format("CALL ducklake_set_branch(%s, %s)", DuckLakeUtil::SQLLiteralToString(catalog_name),
-	                                DuckLakeUtil::SQLLiteralToString(branch_name)));
+	             StringUtil::Format("CALL ducklake_set_branch(%s, %s)", SQLString::ToString(catalog_name),
+	                                SQLString::ToString(branch_name)));
 	return connection;
 }
 
 string BranchTableSql(const string &catalog_name, const string &schema_name, const string &table_name) {
-	return DuckLakeUtil::SQLIdentifierToString(catalog_name) + "." + DuckLakeUtil::SQLIdentifierToString(schema_name) +
-	       "." + DuckLakeUtil::SQLIdentifierToString(table_name);
+	return SQLQuotedIdentifier::ToString(catalog_name) + "." + SQLQuotedIdentifier::ToString(schema_name) +
+	       "." + SQLQuotedIdentifier::ToString(table_name);
 }
 
 void BranchTableColumns(ClientContext &context, const string &catalog_name, const string &branch_name,
@@ -129,7 +129,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		return result;
 	}
 	BoundAtClause fork_clause(Identifier("version"), Value::UBIGINT(result.fork_snapshot_id));
-	auto fork_snapshot = transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND);
+	auto fork_snapshot =
+	    transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND, result.fork_snapshot_id);
 	auto main_changes = DuckLakeBranchManager::MainChangesSince(transaction, *fork_snapshot);
 	set<TableIndex> table_ids {main_table_id};
 	if (DuckLakeBranchManager::KeepsTableLevelRules(main_table_id, false, false, main_changes) ||

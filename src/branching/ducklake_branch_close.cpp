@@ -53,7 +53,7 @@ vector<DuckLakeBranchInfo> DuckLakeBranchManager::GetBranchesWithActivity(DuckLa
 namespace {
 
 string SqlLiteral(const string &value) {
-	return DuckLakeUtil::SQLLiteralToString(value);
+	return SQLString::ToString(value);
 }
 
 string JsonString(const string &value) {
@@ -137,8 +137,8 @@ void ArchiveAndClose(Connection &connection, DuckLakeCatalog &catalog, const str
 	// the archive tables and the close commit together, or not at all
 	RunBranchSql(connection, "BEGIN TRANSACTION");
 	if (!sources.empty()) {
-		RunBranchSql(connection, "CREATE SCHEMA IF NOT EXISTS " + DuckLakeUtil::SQLIdentifierToString(catalog_name) +
-		                             "." + DuckLakeUtil::SQLIdentifierToString(archive_schema));
+		RunBranchSql(connection, "CREATE SCHEMA IF NOT EXISTS " + SQLQuotedIdentifier::ToString(catalog_name) +
+		                             "." + SQLQuotedIdentifier::ToString(archive_schema));
 	}
 	auto comment =
 	    StringUtil::Format("Archived from branch \"%s\" (last activity %s, fork snapshot %d) on %s", info.name,

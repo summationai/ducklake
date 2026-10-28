@@ -14,8 +14,8 @@ static DuckLakeBranchState &GetBranchState(ClientContext &context) {
 	return *context.registered_state->GetOrCreate<DuckLakeBranchState>(DuckLakeBranchState::KEY);
 }
 
-static DuckLakeCatalog &GetBranchCatalog(ClientContext &context, const Value &catalog_name) {
-	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, catalog_name).Cast<DuckLakeCatalog>();
+static DuckLakeCatalog &GetBranchCatalog(ClientContext &context, TableFunctionBindInput &input) {
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	if (catalog.CatalogSnapshot()) {
 		throw InvalidInputException("Branches cannot be used on a DuckLake attached at a fixed snapshot");
 	}
@@ -64,7 +64,7 @@ static unique_ptr<GlobalTableFunctionState> DuckLakeBranchFunctionInit(ClientCon
 
 static unique_ptr<DuckLakeBranchFunctionData> BindBranchFunction(ClientContext &context,
                                                                  TableFunctionBindInput &input) {
-	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
+	auto &catalog = GetBranchCatalog(context, input);
 	if (input.inputs[1].IsNull()) {
 		throw InvalidInputException("Branch name cannot be NULL");
 	}
@@ -437,7 +437,7 @@ struct DuckLakeBranchTableState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData> BranchTableBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
+	auto &catalog = GetBranchCatalog(context, input);
 	if (input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
 		throw InvalidInputException("Branch and table name cannot be NULL");
 	}
@@ -575,7 +575,7 @@ struct DuckLakeCloseStaleState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData> CloseStaleBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<DuckLakeCloseStaleData>(GetBranchCatalog(context, input.inputs[0]));
+	auto result = make_uniq<DuckLakeCloseStaleData>(GetBranchCatalog(context, input));
 	auto older_than = input.named_parameters.find("older_than");
 	if (older_than == input.named_parameters.end() || older_than->second.IsNull()) {
 		throw InvalidInputException("ducklake_close_stale_branches requires older_than: the branches without commits "
@@ -655,7 +655,7 @@ TableFunction DuckLakeBranchFunctions::GetCloseStaleBranchesFunction() {
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> CurrentBranchBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
+	auto &catalog = GetBranchCatalog(context, input);
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	string branch_name = DuckLakeBranchManager::MAIN_BRANCH_NAME;
@@ -670,7 +670,7 @@ static unique_ptr<FunctionData> CurrentBranchBind(ClientContext &context, TableF
 
 static unique_ptr<FunctionData> BranchesBind(ClientContext &context, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
+	auto &catalog = GetBranchCatalog(context, input);
 	names.emplace_back("branch_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("branch_name");

@@ -113,7 +113,7 @@ bool DuckLakeBranchManager::HasBranchTables(DuckLakeTransaction &transaction) {
 	if (IsBranchTablesCached(transaction)) {
 		return true;
 	}
-	auto probe = transaction.Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_branch LIMIT 1");
+	auto probe = transaction.GetMetadataManager().Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_branch LIMIT 1");
 	if (probe->HasError()) {
 		if (probe->GetErrorObject().Type() == ExceptionType::CATALOG) {
 			return false;
@@ -164,7 +164,7 @@ unique_ptr<DuckLakeBranchInfo> DuckLakeBranchManager::GetBranch(DuckLakeTransact
 unique_ptr<DuckLakeBranchInfo> DuckLakeBranchManager::GetActiveBranch(DuckLakeTransaction &transaction,
                                                                       const string &name) {
 	auto branches = ReadBranches(transaction, StringUtil::Format("branch_name = %s AND status = 'active'",
-	                                                             DuckLakeUtil::SQLLiteralToString(name)));
+	                                                             SQLString::ToString(name)));
 	if (branches.empty()) {
 		return nullptr;
 	}
@@ -193,8 +193,8 @@ DuckLakeBranchInfo DuckLakeBranchManager::CreateBranch(DuckLakeTransaction &tran
 	info.name = name;
 	info.fork_snapshot_id = head->snapshot_id;
 	info.status = "active";
-	auto name_literal = DuckLakeUtil::SQLLiteralToString(name);
-	auto result = transaction.Query(StringUtil::Format(
+	auto name_literal = SQLString::ToString(name);
+	auto result = transaction.GetMetadataManager().Query(StringUtil::Format(
 	    "INSERT INTO {METADATA_CATALOG}.ducklake_branching_name VALUES (%s, %d);\n"
 	    "INSERT INTO {METADATA_CATALOG}.ducklake_branching_branch VALUES (%d, %s, %d, 0, 0, 'active', NOW());",
 	    name_literal, info.branch_id, info.branch_id, name_literal, info.fork_snapshot_id));
@@ -593,8 +593,8 @@ static string DeleteFileValues(DuckLakeMetadataManager &metadata_manager, idx_t 
 	auto path = metadata_manager.GetRelativePath(delete_file.file_name);
 	return StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, %s, %s, %s, %d, %d, %d, %s, %s)", file_id, branch_id,
 	                          table_id.index, seq, target_data_file, target_branch_file,
-	                          DuckLakeUtil::SQLLiteralToString(path.path), path.path_is_relative ? "true" : "false",
-	                          DuckLakeUtil::SQLLiteralToString(DeleteFileFormatToString(delete_file.format)),
+	                          SQLString::ToString(path.path), path.path_is_relative ? "true" : "false",
+	                          SQLString::ToString(DeleteFileFormatToString(delete_file.format)),
 	                          delete_file.delete_count, delete_file.file_size_bytes, delete_file.footer_size,
 	                          OptionalToSQL(delete_file.row_group_count),
 	                          DuckLakeUtil::EncryptionKeyLiteral(delete_file.encryption_key));
@@ -637,8 +637,8 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 	set<TableIndex> inserted_tables, deleted_tables, inlined_deleted_tables;
 	unordered_set<string> current_data_files, current_delete_files;
 	for (auto &entry : state.local_changes.Changes()) {
-		TableIndex table_id(StoredTableId(loaded, entry.GetTableIndex()));
-		auto &changes = entry.GetTableChanges();
+		TableIndex table_id(StoredTableId(loaded, entry.first));
+		auto &changes = entry.second;
 		if (changes.new_inlined_data || changes.new_inlined_file_deletes || !changes.compactions.empty()) {
 			throw InternalException("Inlined data and compactions cannot be committed to a branch");
 		}
@@ -653,7 +653,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				AppendValues(data_rows,
 				             StringUtil::Format("(%d, %d, %d, %d, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, %s)",
 				                                file_id, branch_id, table_id.index, new_seq,
-				                                DuckLakeUtil::SQLLiteralToString(path.path),
+				                                SQLString::ToString(path.path),
 				                                path.path_is_relative ? "true" : "false", file.row_count,
 				                                file.file_size_bytes, OptionalToSQL(file.footer_size),
 				                                OptionalToSQL(file.row_group_count), OptionalToSQL(file.partition_id),
@@ -670,7 +670,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				for (auto &partition : file.partition_values) {
 					auto value = partition.partition_value.IsNull()
 					                 ? string("NULL")
-					                 : DuckLakeUtil::SQLLiteralToString(partition.partition_value.ToString());
+					                 : SQLString::ToString(partition.partition_value.ToString());
 					AppendValues(partition_rows,
 					             StringUtil::Format("(%d, %d, %d, %d, %s)", file_id, branch_id, table_id.index,
 					                                partition.partition_column_idx, value));
@@ -715,7 +715,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				inlined_deleted_tables.insert(table_id);
 				AppendValues(inlined_rows,
 				             StringUtil::Format("(%d, %d, %d, %s, %d)", branch_id, new_seq, table_id.index,
-				                                DuckLakeUtil::SQLLiteralToString(inlined_entry.first), row_id));
+				                                SQLString::ToString(inlined_entry.first), row_id));
 			}
 		}
 	}
@@ -771,7 +771,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 	batch += StringUtil::Format(
 	    "INSERT INTO {METADATA_CATALOG}.ducklake_branching_commit VALUES (%d, %d, NOW(), %s, %s, %s, %s);\n", branch_id,
 	    new_seq, state.commit_info.author.ToSQLString(), state.commit_info.commit_message.ToSQLString(),
-	    state.commit_info.commit_extra_info.ToSQLString(), DuckLakeUtil::SQLLiteralToString(changes_made));
+	    state.commit_info.commit_extra_info.ToSQLString(), SQLString::ToString(changes_made));
 	batch += definitions.batch;
 	if (!data_rows.empty()) {
 		batch += "INSERT INTO {METADATA_CATALOG}.ducklake_branching_data_file (branch_file_id, branch_id, table_id, "
@@ -834,7 +834,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 	}
 	for (idx_t attempt = 0;; attempt++) {
 		try {
-			auto update_result = transaction.Query(advance_head);
+			auto update_result = transaction.GetMetadataManager().Query(advance_head);
 			if (update_result->HasError()) {
 				update_result->GetErrorObject().Throw(changed_error + ": ");
 			}
@@ -845,7 +845,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 			if (updated_rows != 1) {
 				throw TransactionException(changed_error);
 			}
-			auto write_result = transaction.Query(batch);
+			auto write_result = transaction.GetMetadataManager().Query(batch);
 			if (write_result->HasError()) {
 				write_result->GetErrorObject().Throw(changed_error + ": ");
 			}
@@ -947,7 +947,8 @@ MainFileDeletes AnalyseMainDelete(ClientContext &context, LocalTableChanges &loc
 		return result;
 	}
 	DuckLakeFileData branch_file_data;
-	local_changes.GetLocalDeleteForFile(table_id, main_delete.data_file_path, branch_file_data);
+	optional_idx branch_delete_begin;
+	local_changes.GetLocalDeleteForFile(table_id, main_delete.data_file_path, branch_file_data, branch_delete_begin);
 	auto branch_scan = DuckLakeDeleteFilter::ScanDeleteFile(context, branch_file_data);
 	result.branch_only.insert(branch_scan.deleted_rows.begin(), branch_scan.deleted_rows.end());
 	// main's cumulative delete files are back-dated, so this may also remove positions main deleted after the fork -
@@ -984,7 +985,8 @@ DuckLakeTableEntry &GetTableAtFork(DuckLakeTransaction &transaction, DuckLakeSna
 unique_ptr<DuckLakeSnapshot> GetForkSnapshot(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch) {
 	BoundAtClause fork_clause(Identifier("version"), Value::UBIGINT(branch.fork_snapshot_id));
 	try {
-		return transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND);
+		return transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND,
+		                                                    branch.fork_snapshot_id);
 	} catch (InvalidInputException &) {
 		throw InvalidInputException("Cannot merge branch \"%s\": its fork snapshot %d was expired", branch.name,
 		                            branch.fork_snapshot_id);
@@ -1196,9 +1198,9 @@ void DuckLakeBranchManager::DropFullyDeletedBranchFiles(DuckLakeTransaction &tra
 	vector<pair<TableIndex, string>> fully_deleted;
 	vector<string> written_by_merge;
 	for (auto &entry : local_changes.Changes()) {
-		for (auto &file : entry.GetTableChanges().new_data_files) {
+		for (auto &file : entry.second.new_data_files) {
 			if (!file.delete_files.empty() && file.delete_files.back().delete_count >= file.row_count) {
-				fully_deleted.emplace_back(entry.GetTableIndex(), file.file_name);
+				fully_deleted.emplace_back(entry.first, file.file_name);
 				merge.files_to_schedule.emplace_back(merge.loaded.data_files[file.file_name], file.file_name);
 				for (auto &delete_file : file.delete_files) {
 					auto branch_file = merge.loaded.delete_files.find(delete_file.file_name);
@@ -1290,8 +1292,8 @@ void DuckLakeBranchManager::CheckMerge(DuckLakeTransaction &transaction, const D
 	EnsureSnapshotsSinceFork(transaction, info);
 	set<TableIndex> deleted_from = transaction.state->tables_deleted_from;
 	for (auto &entry : transaction.state->local_changes.Changes()) {
-		if (!entry.GetTableChanges().new_delete_files.empty()) {
-			deleted_from.insert(entry.GetTableIndex());
+		if (!entry.second.new_delete_files.empty()) {
+			deleted_from.insert(entry.first);
 		}
 	}
 	for (auto &table : merge.row_merge) {
@@ -1496,13 +1498,13 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 
 	// rows the branch adds: its data files, minus the rows it deleted from them again
 	for (auto &change : local_changes.Changes()) {
-		for (auto &file : change.GetTableChanges().new_data_files) {
+		for (auto &file : change.second.new_data_files) {
 			idx_t deleted = file.delete_files.empty() ? 0 : file.delete_files.back().delete_count;
 			if (deleted >= file.row_count) {
 				// left out of main, as the merge does
 				continue;
 			}
-			auto &entry = get_entry(change.GetTableIndex());
+			auto &entry = get_entry(change.first);
 			entry.rows_inserted += file.row_count - deleted;
 			entry.files_added++;
 		}
@@ -1610,13 +1612,19 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 
 	// the checks the merge commit runs, table by table so that every conflict is reported
 	auto changes = transaction.GetTransactionChanges();
-	auto executor = [&](string query) -> unique_ptr<QueryResult> {
+	DuckLakeCommitContext conflict_context;
+	conflict_context.conflict_query_executor = [&](string query) -> unique_ptr<QueryResult> {
 		auto result = metadata_manager.Query(*fork_snapshot, query);
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to preview the merge of a DuckLake branch: ");
 		}
 		return result;
 	};
+	conflict_context.inlined_file_deletion_table_exists = [&](TableIndex table_id) {
+		return metadata_manager.InlinedDeletionTableExists(
+		    DuckLakeMetadataManager::InlinedFileDeletionTableName(table_id));
+	};
+	conflict_context.supports_v1_1_metadata = catalog.SupportsV1_1Metadata();
 	auto other_changes = MainChangesSince(transaction, *fork_snapshot);
 	// the tables both sides changed rows of merge row by row, as the merge decides them
 	auto row_merge = FindRowMergeTables(transaction, loaded, *fork_snapshot, other_changes);
@@ -1649,7 +1657,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		try {
 			// the branch's own rules first: they name the object, DuckLake's give its index
 			CheckMergeDefinitions(transaction, name, *fork_snapshot, object_changes.altered_tables, other_changes);
-			state.CheckForConflicts(object_changes, other_changes, *fork_snapshot, executor);
+			state.CheckForConflicts(object_changes, other_changes, *fork_snapshot, conflict_context);
 			CheckMergeOnlyConflicts(name, object_changes.tables_deleted_from, other_changes);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
@@ -1755,19 +1763,19 @@ string DuckLakeBranchManager::MergeBookkeepingSql(DuckLakeTransaction &transacti
 	    "WHERE "
 	    "NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_branching_branch WHERE branch_id = %d AND head_seq = %d "
 	    "AND status = 'merged');\n",
-	    id, DuckLakeUtil::SQLLiteralToString(info.name), info.fork_snapshot_id, info.head_seq, info.next_file_seq, id,
+	    id, SQLString::ToString(info.name), info.fork_snapshot_id, info.head_seq, info.next_file_seq, id,
 	    merged_seq);
 	string changes_made = with_snapshot ? "merged:{SNAPSHOT_ID}" : "merged";
 	sql +=
 	    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_branching_commit VALUES (%d, %d, NOW(), %s, %s, "
 	                       "%s, %s);\n",
 	                       id, merged_seq, commit_info.author.ToSQLString(), commit_info.commit_message.ToSQLString(),
-	                       commit_info.commit_extra_info.ToSQLString(), DuckLakeUtil::SQLLiteralToString(changes_made));
+	                       commit_info.commit_extra_info.ToSQLString(), SQLString::ToString(changes_made));
 	string scheduled;
 	for (auto &file : merge.files_to_schedule) {
 		auto path = metadata_manager.GetRelativePath(file.second);
 		AppendValues(scheduled,
-		             StringUtil::Format("(%d, %s, %s, NOW())", file.first, DuckLakeUtil::SQLLiteralToString(path.path),
+		             StringUtil::Format("(%d, %s, %s, NOW())", file.first, SQLString::ToString(path.path),
 		                                path.path_is_relative ? "true" : "false"));
 	}
 	if (!scheduled.empty()) {
