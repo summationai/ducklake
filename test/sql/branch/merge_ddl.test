@@ -331,7 +331,7 @@ does not exist
 
 # nested schemas, on a lake with 1.1 metadata
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/merge_ddl_nested_files', METADATA_CATALOG 'nested_meta')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1', DATA_PATH '{DATA_PATH}/merge_ddl_nested_files', METADATA_CATALOG 'nested_meta')
 
 statement ok
 CREATE SCHEMA nested.outer_s
