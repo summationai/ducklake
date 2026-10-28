@@ -1761,12 +1761,13 @@ string DuckLakeBranchManager::MergeBookkeepingSql(DuckLakeTransaction &transacti
 	    "AND status = 'merged');\n",
 	    id, SQLString::ToString(info.name), info.fork_snapshot_id, info.head_seq, info.next_file_seq, id,
 	    merged_seq);
-	string changes_made = with_snapshot ? "merged:{SNAPSHOT_ID}" : "merged";
+	// placeholders are only replaced outside literals, so the snapshot id is appended to the literal
+	string changes_made = with_snapshot ? "'merged:' || CAST({SNAPSHOT_ID} AS VARCHAR)" : SQLString::ToString("merged");
 	sql +=
 	    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_branching_commit VALUES (%d, %d, NOW(), %s, %s, "
 	                       "%s, %s);\n",
 	                       id, merged_seq, commit_info.author.ToSQLString(), commit_info.commit_message.ToSQLString(),
-	                       commit_info.commit_extra_info.ToSQLString(), SQLString::ToString(changes_made));
+	                       commit_info.commit_extra_info.ToSQLString(), changes_made);
 	string scheduled;
 	for (auto &file : merge.files_to_schedule) {
 		auto path = metadata_manager.GetRelativePath(file.second);
