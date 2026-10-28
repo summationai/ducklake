@@ -59,7 +59,7 @@ bool DuckLakeBranchManager::HasDefinitionTables(DuckLakeTransaction &transaction
 	if (IsDefinitionTablesCached(transaction)) {
 		return true;
 	}
-	auto probe = transaction.Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_object LIMIT 1");
+	auto probe = transaction.GetMetadataManager().Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_object LIMIT 1");
 	if (probe->HasError()) {
 		if (probe->GetErrorObject().Type() == ExceptionType::CATALOG) {
 			return false;
@@ -74,7 +74,7 @@ bool DuckLakeBranchManager::HasColumnChangeTable(DuckLakeTransaction &transactio
 	if (!HasDefinitionTables(transaction)) {
 		return false;
 	}
-	auto probe = transaction.Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_column_change LIMIT 1");
+	auto probe = transaction.GetMetadataManager().Query("SELECT NULL FROM {METADATA_CATALOG}.ducklake_branching_column_change LIMIT 1");
 	if (probe->HasError()) {
 		if (probe->GetErrorObject().Type() == ExceptionType::CATALOG) {
 			return false;
@@ -87,7 +87,7 @@ bool DuckLakeBranchManager::HasColumnChangeTable(DuckLakeTransaction &transactio
 namespace {
 
 string Literal(const string &value) {
-	return DuckLakeUtil::SQLLiteralToString(value);
+	return SQLString::ToString(value);
 }
 
 string ValueLiteral(const Value &value) {
@@ -193,6 +193,14 @@ DuckLakeBranchObjectRows EncodeView(DuckLakeLoadedBranch &loaded, DuckLakeViewEn
 }
 
 //! The rows of every schema, table and view the branch created, as the transaction has them now
+static idx_t SchemaDepth(const DuckLakeSchemaEntry &schema) {
+	idx_t depth = 0;
+	for (auto parent = schema.ParentDuckLakeSchema(); parent; parent = parent->ParentDuckLakeSchema()) {
+		depth++;
+	}
+	return depth;
+}
+
 map<idx_t, DuckLakeBranchObjectRows> EncodeObjects(DuckLakeTransaction &transaction, DuckLakeLoadedBranch &loaded,
                                                    optional_ptr<const ObjectIdAllocator> allocate) {
 	auto &state = DuckLakeBranchManager::GetTransactionState(transaction);
@@ -205,7 +213,7 @@ map<idx_t, DuckLakeBranchObjectRows> EncodeObjects(DuckLakeTransaction &transact
 		// parents first, so that they get their ids first
 		std::stable_sort(schemas.begin(), schemas.end(),
 		                 [](const reference<DuckLakeSchemaEntry> &a, const reference<DuckLakeSchemaEntry> &b) {
-			                 return a.get().SchemaDepth() < b.get().SchemaDepth();
+			                 return SchemaDepth(a.get()) < SchemaDepth(b.get());
 		                 });
 		for (auto &schema_ref : schemas) {
 			auto &schema = schema_ref.get();
@@ -580,7 +588,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 	}
 	// column changes, per table (stored id) in the order the branch made them
 	map<idx_t, map<idx_t, StoredColumnChange>> column_changes;
-	auto change_result = transaction.Query(
+	auto change_result = transaction.GetMetadataManager().Query(
 	    "SELECT table_id, change_seq, change_type, column_id, parent_column, column_order, column_name, column_type, "
 	    "initial_default, default_value, default_value_type, nulls_allowed FROM "
 	    "{METADATA_CATALOG}.ducklake_branching_column_change WHERE " +
