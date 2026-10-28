@@ -145,7 +145,9 @@ DuckLakeSnapshot DuckLakeBranchManager::GetBranchSnapshot(DuckLakeTransaction &t
 	if (branch && branch->IsActive()) {
 		BoundAtClause fork_clause(Identifier("version"), Value::UBIGINT(branch->fork_snapshot_id));
 		try {
-			fork_snapshot = transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND);
+			// bounded by the fork itself: the transaction's newest visible snapshot is what this load computes
+			fork_snapshot = transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND,
+			                                                             branch->fork_snapshot_id);
 		} catch (InvalidInputException &) {
 			// the fork snapshot was expired
 		}
@@ -224,7 +226,7 @@ string DuckLakeBranchManager::ChangesFingerprint(DuckLakeTransaction &transactio
 	                                 state.tables_deleted_from.size(), state.tables_delete_attempted.size());
 	result += "/" + CatalogChangesFingerprint(transaction);
 	for (auto &entry : state.local_changes.Changes()) {
-		auto &changes = entry.GetTableChanges();
+		auto &changes = entry.second;
 		idx_t delete_files = 0;
 		for (auto &file : changes.new_delete_files) {
 			delete_files += file.second.size();
@@ -238,7 +240,7 @@ string DuckLakeBranchManager::ChangesFingerprint(DuckLakeTransaction &transactio
 			auto &inlined = *changes.new_inlined_data;
 			inlined_rows = inlined.data ? inlined.data->Count() : inlined.external_row_count;
 		}
-		result += StringUtil::Format(";%d:%d/%d/%d/%d/%d/%d", entry.GetTableIndex().index,
+		result += StringUtil::Format(";%d:%d/%d/%d/%d/%d/%d", entry.first.index,
 		                             changes.new_data_files.size(), delete_files, inlined_rows, inlined_deletes,
 		                             changes.new_inlined_file_deletes ? 1 : 0, changes.compactions.size());
 	}
