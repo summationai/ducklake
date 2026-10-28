@@ -296,7 +296,7 @@ SELECT SUM(i) FROM t
 
 # nested schemas, on a lake with 1.1 metadata: under a schema of main and under one the branch created
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/ddl_create_nested_files', METADATA_CATALOG 'nested_meta')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1', DATA_PATH '{DATA_PATH}/ddl_create_nested_files', METADATA_CATALOG 'nested_meta')
 
 statement ok
 CREATE SCHEMA nested.outer_s
@@ -329,7 +329,7 @@ statement ok
 DETACH nested
 
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/ddl_create_nested_files', METADATA_CATALOG 'nested_meta')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1', DATA_PATH '{DATA_PATH}/ddl_create_nested_files', METADATA_CATALOG 'nested_meta')
 
 statement ok
 CALL ducklake_set_branch('nested', 'nb')

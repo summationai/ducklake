@@ -63,4 +63,4 @@ EXPLAIN SELECT * FROM empty_t
 query II
 EXPLAIN SELECT count(*) FROM big JOIN small ON big.i = small.i
 ----
-physical_plan	<REGEX>:.*Table: big[ │]*Table: small.*
+physical_plan	<REGEX>:.*Table: [a-z.]*big[ │]*Table: [a-z.]*small.*
