@@ -228,12 +228,6 @@ void DuckLakeBranching::RemoveDeleteFile(FileSystem &fs, const DuckLakeDeleteFil
 	}
 }
 
-void DuckLakeBranching::TryRemoveDeleteFile(FileSystem &fs, const DuckLakeDeleteFile &file) {
-	if (OwnsDeleteFile(file)) {
-		fs.TryRemoveFile(file.file_name);
-	}
-}
-
 bool DuckLakeBranching::OwnsDeleteFile(const DuckLakeDeleteFile &file) {
 	return file.created_by_ducklake;
 }

@@ -5,7 +5,7 @@ All branching code lives in `src/branching/` and `src/include/branching/`. Upstr
 rebase onto a new DuckLake release conflicts, these are the lines to re-apply. Each one sits at a function boundary or
 replaces a single existing line, so the place to put it back is usually obvious from the function name.
 
-Footprint against upstream: 20 files, about +100 / -20 lines. Check it with:
+Footprint against upstream (DuckLake `417a9117`, the commit DuckDB v2.0.0 pins): 21 files, +101 / -13 lines. Check it with:
 
 ```bash
 git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branching'
@@ -20,23 +20,25 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | | `LoadInternal`, at the end | `Register(loader, config)` | the branch functions and, unless `DUCKLAKE_BRANCH_SYNTAX=off`, the `CREATE/SET/DROP/MERGE BRANCH` parser extension |
 | `src/storage/ducklake_transaction_manager.cpp` | `StartTransaction`, after `Start()` | `OnTransactionStart(*transaction, context)` | puts the transaction on the connection's selected branch |
 | | same, the immediate-mode condition | `&& !IsOnBranch(*transaction)` | a branch is loaded on first use, not at transaction start |
-| `src/storage/ducklake_transaction.cpp` | `GetSnapshot()`, at entry | `TryGetSnapshot(*this, branch_snapshot)` | a branch reads main at its fork, with the branch's changes loaded |
-| | `Commit()`, first statement in the `try` | `TryCommit(*this)` | commits to the branch, merges a branch into main, or closes a stale branch |
+| `src/storage/ducklake_transaction.cpp` | `GetLatestSnapshot()`, at entry, before `snapshot_lock` | `TryGetSnapshot(*this, branch_snapshot)` | a branch reads main at its fork, with the branch's changes loaded |
+| | `Commit()`, the `ChangesMade()` condition | `if (TryCommit(*this)) {} else if (ChangesMade())` | commits to the branch, merges a branch into main, or closes a stale branch |
+| | `Commit()`, the expired-snapshot cleanup | `DeleteSnapshots(*this, expired_snapshots)` (replaces `GetMetadataManager().DeleteSnapshots`) | keeps the snapshots an open branch needs |
 | | `RunCommitLoop`, before `state->Commit` | `PrepareCommitLoop(*this, context)` | a merge, or the close of a stale branch, checks its branch on every attempt and records itself in the snapshot's batch; a merge of adjacent files or a flush of inlined rows is checked against the forks committed by then (`CheckMaintenanceAgainstForks`, read on a new connection) |
 | | `DeleteSnapshots` | `DeleteSnapshots(*this, snapshots)` (replaces `metadata_manager.DeleteSnapshots`) | keeps the snapshots an open branch needs |
 | | `CreateEntry`, `DropEntry`, `AlterEntry`, at entry | `CheckCreate(*this, *entry)`, `CheckDrop(*this, entry)`, `CheckAlter(*this, entry, new_entry.get())` | refuse the catalog changes a branch does not support yet |
 | | `GetTransactionLocalSchemas`, `GetTransactionLocalSchema`, `GetCatalogVersion`, at entry | `EnsureLoaded(*this)` | a branch's catalog changes are loaded before the transaction's own schemas or its catalog version are read |
-| | `GetSnapshot(at_clause)`, `SetConfigOption`, `ResetConfigOption`, `DeleteSnapshots`, `DeleteInlinedData`, `MarkInlinedDataForDeletion`, `AddCompaction`, `AddNameMap`, at entry | `EnsureNotOnBranch(*this, "...")` | operations a branch does not support yet |
-| | `LocalTableChanges::CleanupFiles` (both), `DropTransactionLocalFile`, `AddDeletesToMap` | `RemoveDeleteFile` / `TryRemoveDeleteFile(fs, file)` (replace `fs.RemoveFile` / `fs.TryRemoveFile` of a delete file) | delete files of earlier branch commits are never removed by this transaction |
+| | `GetSnapshot(at_clause)` (before `GetNewestVisibleSnapshotId`), `SetConfigOption`, `ResetConfigOption`, `DeleteSnapshots`, `MarkInlinedDataForDeletion`, `AddCompaction`, `AddNameMap`, at entry | `EnsureNotOnBranch(*this, "...")` | operations a branch does not support yet |
+| | `LocalTableChanges::TryDropTransactionLocalFile`, `AddDeletesToMap` | `RemoveDeleteFile(fs, file)` (replaces `fs.RemoveFile` of a delete file) | delete files of earlier branch commits are never removed by this transaction |
+| | `LocalTableDataChanges::AddWrittenFiles`, the delete-file loop | `if (include_added_files \|\| OwnsDeleteFile(file))` around `other_files.push_back` | same, for both `CleanupFiles` and `DropTransactionLocalFile`, which remove what `AddWrittenFiles` lists |
 | | `TransactionLocalDelete` | `if (OwnsDeleteFile(old_file))` around `files_to_delete.push_back` | same, for the batched removal |
-| `src/storage/ducklake_transaction_state.cpp` | `CheckForConflicts`, after the conflict check | `pre_commit_check(other_changes)` | runs the merge's own checks |
+| `src/storage/ducklake_transaction_state.cpp` | `CheckForConflicts`, before DuckLake's own conflict check | `pre_commit_check(other_changes)` | runs the merge's own checks, so a merge reports its branch conflict before the table-level one |
 | | `Commit`, the attempt loop | `if (i > 0 \|\| context.pre_commit_check)`, `context.pre_commit_check` passed on, `batch_queries += context.extra_commit_sql` | a merge checks conflicts from the first attempt and commits its bookkeeping atomically |
 | `src/storage/ducklake_delete.cpp` | `FlushDelete`, after `delete_file.data_file_id` is set | `TryFlushDelete(...)` | a branch delete on a main file keeps main's deletes at the fork plus the branch's |
 | | `TryDropFullyDeletedFile`, the transaction-local branch | `KeepsLocalFile(...)` | files of earlier branch commits stay, so later row ids do not shift |
 | `src/storage/ducklake_catalog.cpp` | `GetInliningLimit`, the final return | `return InliningLimit(transaction, limit)` | branch writes always go to files |
 | `src/storage/ducklake_scan.cpp` | `DuckLakeFunctionInfo::CanUseGlobalStats` | `&& CanUseGlobalStats(*active_transaction)` | global stats describe main's head, not a branch |
 | `src/storage/ducklake_table_entry.cpp` | `DuckLakeTableEntry::CanUseGlobalStats` | `&& CanUseGlobalStats(transaction)` | same |
-| `src/storage/ducklake_multi_file_list.cpp` | `GetFilesForTable`, the local-deletes loop | `PrepareLocalDelete(...)` | a branch delete file already holds main's inlined file deletions |
+| `src/storage/ducklake_multi_file_list.cpp` | `ApplyLocalChanges`, after `ApplyLocalFileChanges` | `PrepareLocalDelete(...)` for each file when the table has local deletes | a branch delete file already holds main's inlined file deletions |
 | | `GetCardinality`, when there are no stats | `return BranchCardinality(context, read_info.table)` (replaces `return nullptr`) | on a branch the planner still gets main's row count as an estimate |
 | `src/storage/ducklake_metadata_manager.cpp` | `GetOrphanFilesForCleanup`, after the known files are read | `AddKnownFiles(...)` | branch files are not orphans, nor main files a merge moved there after main's files were read |
 | `src/functions/ducklake_expire_snapshots.cpp` | bind, after the "never the latest snapshot" filter | `filter += ExpirableSnapshotFilter(...)` | open branches pin their fork and every later snapshot |
@@ -142,9 +144,12 @@ It adds no call site. After a rebase, check:
 ## After a rebase
 
 1. `make release`. Compile errors in `src/branching/` mean upstream changed one of the members above.
-2. `build/release/test/unittest "test/sql/branch/*"`, also with `--test-config test/configs/{no_inline,deletion_vectors,sqlite,ducklake_version}.json`.
+2. `build/release/test/unittest "test/sql/branch/*"`, also with `--test-config test/configs/{no_inline,deletion_vectors,sqlite,ducklake_version}.json`,
+   and with `postgres.json` against a scratch Postgres: the config drops `public` before each test, and five tests
+   attach a second lake on `<dbname>_nested`, `_other` or `_v11`, which must exist (or those tests skip) and be empty
+   (`on_init` resets only `<dbname>`).
 3. The regression directories: `transaction delete update data_inlining deletion_inlining compaction cleanup remove_orphans time_travel table_changes stats snapshot_info checkpoint partitioning catalog alter comments schema_evolution`.
 4. `scripts/branching/coverage.sh` regenerates [COVERAGE.md](COVERAGE.md) and fails if a function in `src/branching/` is
    never executed or an uncovered line has no reason.
-5. Check for a new upstream file-removal site in `LocalTableChanges` that is not routed through `RemoveDeleteFile` /
-   `TryRemoveDeleteFile`: it would delete a branch's files on rollback.
+5. Check for a new upstream file-removal site in `LocalTableChanges` that is not routed through `RemoveDeleteFile`,
+   `OwnsDeleteFile` or the `AddWrittenFiles` filter: it would delete a branch's files on rollback.

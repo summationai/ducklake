@@ -170,6 +170,12 @@ CALL ducklake_set_branch('nested', 'main')
 statement ok
 DELETE FROM nested.outer_s.inner_s.t WHERE i = 2
 
+# the dry run checks the branch's deletes against main's inlined ones, as the merge does
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('nested', 'nb', dry_run => true)
+----
+t	conflict
+
 statement error
 CALL ducklake_merge_branch('nested', 'nb')
 ----

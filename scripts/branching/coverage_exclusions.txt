@@ -45,3 +45,6 @@ src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::HasColumnChangeTa
 src/branching/ducklake_branch_ddl.cpp | DuckLakeBranchManager::LoadDefinitions | Failed to read DuckLake branch column | the metadata catalog fails for a reason other than a missing table
 src/branching/ducklake_branch_close.cpp | DuckLakeBranchManager::CommitClose | Failed to close branch | the metadata catalog fails while recording the close of a branch with nothing to archive
 src/branching/ducklake_branch_functions.cpp | BranchTableInit | result->result->GetErrorObject().Throw(); | reading the table on the branch fails after its columns were read, i.e. its metadata or data files cannot be read
+
+# read once when the extension loads, before a test can set it
+src/branching/ducklake_branching.cpp | BranchSyntaxEnabled | must be \"on\" or \"off\" | an invalid DUCKLAKE_BRANCH_SYNTAX fails the extension load; the sqllogictest runner sets environment variables only after loading the extension (branch_syntax_off covers "off")
