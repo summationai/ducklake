@@ -2665,6 +2665,9 @@ SnapshotAndStats DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot tr
 	// parse changes made by other transactions
 	auto other_changes = SnapshotChangeInformation::ParseChangesMade(changes_made.changes_made);
 
+	if (context.pre_commit_check) {
+		context.pre_commit_check(other_changes);
+	}
 	// now check for conflicts
 	CheckForConflicts(changes, other_changes, transaction_snapshot, context);
 
@@ -2674,9 +2677,6 @@ SnapshotAndStats DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot tr
 	                    &other_changes.tables_deleted_inlined, &other_changes.tables_flushed_inlined,
 	                    &other_changes.tables_merge_adjacent, &other_changes.tables_rewrite_delete}) {
 		tables_changed_by_others.insert(tables->begin(), tables->end());
-	}
-	if (context.pre_commit_check) {
-		context.pre_commit_check(other_changes);
 	}
 
 	return snapshot_and_stats;
