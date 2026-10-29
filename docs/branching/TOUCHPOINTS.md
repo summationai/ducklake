@@ -5,7 +5,8 @@ All branching code lives in `src/branching/` and `src/include/branching/`. Upstr
 rebase onto a new DuckLake release conflicts, these are the lines to re-apply. Each one sits at a function boundary or
 replaces a single existing line, so the place to put it back is usually obvious from the function name.
 
-Footprint against upstream (DuckLake `417a9117`, the commit DuckDB v2.0.0 pins): 21 files, +101 / -13 lines. Check it with:
+Footprint against upstream (DuckLake `9a680f90`, on the `v2.0-cyanoptera` release line; DuckDB v2.0.0 itself pins
+`417a9117`, an ancestor): 21 files, +101 / -13 lines. Check it with:
 
 ```bash
 git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branching'
@@ -121,6 +122,9 @@ rebase, check:
   inlined data table; an UPDATE keeps the row id.
 - `ducklake_table_deletions(catalog, schema, table, start, end)` lists every row main deleted, the old copies of updated
   rows included.
+- `MainChangesSince` reads main's changes since the fork with the query the metadata manager builds for that snapshot
+  (`GetSnapshotAndStatsAndChangesQuery`), as the commit loop's conflict check does; on Postgres it is one remote
+  statement.
 - `DuckLakeTransactionState::Commit` uses the `TransactionChangeInformation` it is given for the conflict checks and the
   catalog writes only; `WriteSnapshotChanges` rebuilds the insert and delete sets from the state. A merge takes the
   tables it merges row by row out of those sets (`ExcludeFromInsertDeleteRules`).
