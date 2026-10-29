@@ -37,8 +37,9 @@ SnapshotChangeInformation DuckLakeBranchManager::MainChangesSince(DuckLakeTransa
 		return result;
 	};
 	SnapshotAndStats snapshot_and_stats;
-	auto changes = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(
-	    snapshot_and_stats, executor, transaction.GetCatalog().SupportsV1_1Metadata());
+	auto query =
+	    metadata_manager.GetSnapshotAndStatsAndChangesQuery(snapshot, transaction.GetCatalog().SupportsV1_1Metadata());
+	auto changes = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor, query);
 	return SnapshotChangeInformation::ParseChangesMade(changes.changes_made);
 }
 
