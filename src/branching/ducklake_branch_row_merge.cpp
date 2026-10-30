@@ -152,8 +152,9 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 			// tables in nested schemas keep the table-level rules
 			continue;
 		}
-		if (!HiddenVirtualColumn(*entry).empty()) {
-			// so do tables with a column that hides one the merge reads by name: their rows can't be located
+		// so do tables with a column that hides one the merge reads by name, on either side: rows can't be located
+		auto local_version = LocalTableVersion(transaction, table_id);
+		if (!HiddenVirtualColumn(*entry).empty() || (local_version && !HiddenVirtualColumn(*local_version).empty())) {
 			continue;
 		}
 		DuckLakeRowMergeTable table;
@@ -163,7 +164,6 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		table.branch_name = table.main_name;
 		// a table renamed on the branch is read there under its new name; one whose columns the branch changed is
 		// compared on the branch's columns
-		auto local_version = LocalTableVersion(transaction, table_id);
 		if (local_version) {
 			table.branch_name = local_version->name.GetIdentifierName();
 			ProjectColumns(*local_version, entry->Cast<DuckLakeTableEntry>(), table.branch_columns, table.main_columns);

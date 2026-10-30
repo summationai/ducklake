@@ -412,6 +412,15 @@ struct DuckLakeBranchTableData : public TableFunctionData {
 	string branch_name;
 	string schema_name;
 	string table_name;
+	//! Whether the first column is the row id on main
+	bool include_rowid = true;
+	//! The types bound, which the branch must still have when the table is read
+	vector<LogicalType> types;
+
+	//! The branch can change between PREPARE and EXECUTE, so a prepared call is bound again every time
+	bool SupportStatementCache() const override {
+		return false;
+	}
 };
 
 struct DuckLakeBranchTableState : public GlobalTableFunctionState {
@@ -435,17 +444,31 @@ static unique_ptr<FunctionData> BranchTableBind(ClientContext &context, TableFun
 	if (schema != input.named_parameters.end() && !schema->second.IsNull()) {
 		result->schema_name = schema->second.GetValue<string>();
 	}
+	auto include_rowid = input.named_parameters.find("include_rowid");
+	if (include_rowid != input.named_parameters.end() && !include_rowid->second.IsNull()) {
+		result->include_rowid = BooleanValue::Get(include_rowid->second);
+	}
 	vector<string> column_names;
 	vector<LogicalType> column_types;
 	BranchTableColumns(context, result->catalog_name, result->branch_name, result->schema_name, result->table_name,
 	                   column_names, column_types);
-	// the row id on main: a row the branch inserted has none yet
-	names.emplace_back("rowid");
-	return_types.emplace_back(LogicalType::BIGINT);
+	if (result->include_rowid) {
+		for (auto &column_name : column_names) {
+			if (StringUtil::CIEquals(column_name, "rowid")) {
+				throw InvalidInputException("Table \"%s\" has a column named rowid, which hides DuckDB's row id - read "
+				                            "it with include_rowid => false",
+				                            result->table_name);
+			}
+		}
+		// the row id on main: a row the branch inserted has none yet
+		names.emplace_back("rowid");
+		return_types.emplace_back(LogicalType::BIGINT);
+	}
 	for (idx_t column = 0; column < column_names.size(); column++) {
 		names.emplace_back(column_names[column]);
 		return_types.push_back(column_types[column]);
 	}
+	result->types = return_types;
 	return std::move(result);
 }
 
@@ -453,8 +476,9 @@ static unique_ptr<GlobalTableFunctionState> BranchTableInit(ClientContext &conte
 	auto &data = input.bind_data->Cast<DuckLakeBranchTableData>();
 	auto result = make_uniq<DuckLakeBranchTableState>();
 	result->connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
-	result->result = result->connection->Submit("SELECT rowid, * FROM " +
-	                                            BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
+	result->result =
+	    result->connection->Submit(string(data.include_rowid ? "SELECT rowid, * FROM " : "SELECT * FROM ") +
+	                               BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
 	if (result->result->HasError()) {
 		result->result->GetErrorObject().Throw();
 	}
@@ -462,14 +486,26 @@ static unique_ptr<GlobalTableFunctionState> BranchTableInit(ClientContext &conte
 }
 
 static void BranchTableExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->Cast<DuckLakeBranchTableData>();
 	auto &state = data_p.global_state->Cast<DuckLakeBranchTableState>();
 	auto chunk = state.result->Fetch();
 	if (!chunk) {
 		output.SetCardinality(0);
 		return;
 	}
-	for (idx_t column = 1; column < chunk->ColumnCount(); column++) {
+	// the branch's columns are read again here: a change committed since the bind no longer fits its output
+	if (chunk->GetTypes() != data.types) {
+		throw InvalidInputException("The columns of table \"%s\" on branch \"%s\" changed while it was read - run the "
+		                            "query again",
+		                            data.table_name, data.branch_name);
+	}
+	idx_t first_column = data.include_rowid ? 1 : 0;
+	for (idx_t column = first_column; column < chunk->ColumnCount(); column++) {
 		output.data[column].Reference(chunk->data[column]);
+	}
+	if (!data.include_rowid) {
+		output.SetCardinality(chunk->size());
+		return;
 	}
 	auto &row_ids = output.data[0];
 	auto row_id_data = FlatVector::GetDataMutable<int64_t>(row_ids);
@@ -489,6 +525,7 @@ TableFunction DuckLakeBranchFunctions::GetBranchTableFunction() {
 	TableFunction function("ducklake_branch_table", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                       BranchTableExecute, BranchTableBind, BranchTableInit);
 	function.named_parameters["schema"] = LogicalType::VARCHAR;
+	function.named_parameters["include_rowid"] = LogicalType::BOOLEAN;
 	return function;
 }
 

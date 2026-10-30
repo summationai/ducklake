@@ -329,3 +329,44 @@ FROM rows ORDER BY a
 2	200
 3	300
 4	0
+
+# a column named rowid added on the branch hides DuckDB's row id there: the table keeps the table-level rules
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH main
+
+statement ok
+CREATE TABLE addrid(i INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO addrid VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE BRANCH addrid_branch
+
+statement ok
+UPDATE addrid SET v = 11 WHERE i = 1
+
+statement ok
+SET BRANCH addrid_branch
+
+statement ok
+ALTER TABLE addrid ADD COLUMN rowid INTEGER
+
+statement ok
+UPDATE addrid SET v = 22 WHERE i = 2
+
+statement ok
+SET BRANCH main
+
+statement error
+MERGE BRANCH addrid_branch
+----
+Transaction conflict
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'addrid_branch', dry_run => true, table_name => 'addrid')
+----
+has a column named rowid
