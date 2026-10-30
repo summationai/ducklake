@@ -19,6 +19,7 @@ namespace duckdb {
 ScalarFunction DuckLakeMurmur3Function();
 
 static void LoadInternal(ExtensionLoader &loader) {
+	DuckLakeBranching::CheckLoadSettings();
 	loader.SetDescription("Adds support for DuckLake, SQL as a Lakehouse Format");
 
 	auto &instance = loader.GetDatabaseInstance();
