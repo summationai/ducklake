@@ -257,13 +257,18 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 	if (forks.empty()) {
 		return false;
 	}
-	auto newest_fork = *std::max_element(forks.begin(), forks.end());
+	// a row is pinned if any fork sees it: one deleted on main between two forks is still read by the older one
+	string fork_values;
+	for (auto fork : forks) {
+		fork_values += (fork_values.empty() ? "(" : ", (") + to_string(fork) + ")";
+	}
 	auto &metadata_manager = transaction.GetMetadataManager();
 	auto col_names = metadata_manager.InlinedColNames();
-	auto result = metadata_manager.Query(
-	    StringUtil::Format("SELECT 1 FROM {METADATA_CATALOG}.%s WHERE %s <= %d AND (%s IS NULL OR %s > %d) LIMIT 1",
-	                       inlined_table.table_name, col_names.begin_snapshot, newest_fork, col_names.end_snapshot,
-	                       col_names.end_snapshot, newest_fork));
+	auto result = metadata_manager.Query(StringUtil::Format(
+	    "SELECT 1 FROM {METADATA_CATALOG}.%s, (VALUES %s) forks(fork) WHERE %s <= fork AND (%s IS NULL OR %s > fork) "
+	    "LIMIT 1",
+	    inlined_table.table_name, fork_values, col_names.begin_snapshot, col_names.end_snapshot,
+	    col_names.end_snapshot));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
 	}
