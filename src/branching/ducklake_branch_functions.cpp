@@ -46,6 +46,11 @@ struct DuckLakeBranchFunctionData : public TableFunctionData {
 	unique_ptr<DuckLakeMergeRowsBindData> rows;
 	//! What the merge does with rows both sides changed differently
 	DuckLakeConflictResolution on_conflict = DuckLakeConflictResolution::FAIL;
+
+	//! The branch and main can change between PREPARE and EXECUTE, so a prepared call is bound again every time
+	bool SupportStatementCache() const override {
+		return false;
+	}
 };
 
 struct DuckLakeBranchFunctionState : public GlobalTableFunctionState {

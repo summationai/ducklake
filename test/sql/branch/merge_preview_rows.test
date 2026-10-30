@@ -229,3 +229,78 @@ SELECT item, price FROM prices ORDER BY item
 Boots	80
 Hat	25
 Jacket	110
+
+# a prepared dry run is bound again on every EXECUTE, so it sees changes made after PREPARE
+statement ok
+CREATE TABLE u(i INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO u VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE BRANCH p
+
+statement ok
+UPDATE u SET v = 100 WHERE i = 1
+
+statement ok con2
+USE ducklake
+
+statement ok con2
+SET BRANCH p
+
+statement ok con2
+UPDATE u SET v = 21 WHERE i = 2
+
+statement ok
+PREPARE dry AS SELECT rowid, merge_status FROM ducklake_merge_branch('ducklake', 'p', dry_run => true, table_name => 'u') WHERE change_type = 'update_postimage' ORDER BY rowid
+
+query IT
+EXECUTE dry
+----
+1	ok
+
+# the branch now changes row 0 differently from main
+statement ok con2
+UPDATE u SET v = 200 WHERE i = 1
+
+query IT
+EXECUTE dry
+----
+0	conflict
+1	ok
+
+statement ok con2
+SET BRANCH main
+
+statement ok
+DROP BRANCH p
+
+# a column named rowid hides DuckDB's row id: the row view refuses the table, the summary reports it
+statement ok
+CREATE TABLE rid(rowid INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO rid VALUES (0, 10)
+
+statement ok
+CREATE BRANCH r
+
+statement ok
+SET BRANCH r
+
+statement ok
+UPDATE rid SET v = 11
+
+statement ok
+SET BRANCH main
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'r', dry_run => true, table_name => 'rid')
+----
+has a column named rowid
+
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'r', dry_run => true)
+----
+rid	ok
