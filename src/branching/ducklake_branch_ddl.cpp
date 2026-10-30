@@ -458,8 +458,13 @@ unique_ptr<DuckLakeFieldId> ColumnFieldId(const DuckLakeColumnInfo &col) {
 vector<StoredColumn> BuildColumnTree(vector<StoredColumn> columns, const string &branch_name) {
 	map<idx_t, vector<idx_t>> children;
 	vector<idx_t> roots;
+	set<idx_t> column_ids;
 	for (idx_t column_idx = 0; column_idx < columns.size(); column_idx++) {
 		auto &column = columns[column_idx];
+		// with unique ids every column has one parent, so the tree below can't loop
+		if (!column_ids.insert(column.column_id).second) {
+			throw InvalidInputException("Branch \"%s\" has two columns with id %d", branch_name, column.column_id);
+		}
 		if (column.parent.IsValid()) {
 			children[column.parent.GetIndex()].push_back(column_idx);
 		} else {
