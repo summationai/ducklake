@@ -42,6 +42,11 @@ struct DuckLakeBranchFunctionData : public TableFunctionData {
 	bool dry_run = false;
 	//! The dry run of one table, row by row
 	unique_ptr<DuckLakeMergeRowsBindData> rows;
+
+	//! The branch and main can change between PREPARE and EXECUTE, so a prepared call is bound again every time
+	bool SupportStatementCache() const override {
+		return false;
+	}
 };
 
 struct DuckLakeBranchFunctionState : public GlobalTableFunctionState {

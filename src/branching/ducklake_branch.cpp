@@ -1464,6 +1464,10 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		PlanRowMerge(context, catalog.GetName().GetIdentifierName(), name, branch->fork_snapshot_id,
 		             head_snapshot.snapshot_id, table.second);
 	}
+	if (!row_merge.empty()) {
+		// the row plans read the branch on new connections: they must see the head the counts below come from
+		EnsureBranchHeadCommitted(transaction, *branch);
+	}
 	// the rules compare the transaction's delete files and dropped files with main's, so they see one table at a time
 	auto all_local_changes = std::move(local_changes.changes);
 	auto all_dropped_files = std::move(state.dropped_files);
@@ -1684,6 +1688,19 @@ static vector<idx_t> QueryCommittedMetadata(DuckLakeTransaction &transaction, st
 		values.push_back(row.GetValue<idx_t>(0));
 	}
 	return values;
+}
+
+void DuckLakeBranchManager::EnsureBranchHeadCommitted(DuckLakeTransaction &transaction,
+                                                      const DuckLakeBranchInfo &branch) {
+	auto heads = QueryCommittedMetadata(
+	    transaction,
+	    StringUtil::Format("SELECT head_seq FROM {METADATA_CATALOG}.ducklake_branching_branch WHERE branch_id = %d AND "
+	                       "status = 'active'",
+	                       branch.branch_id));
+	if (heads.size() != 1 || heads[0] != branch.head_seq) {
+		throw TransactionException(
+		    "Branch \"%s\" changed while the dry run read it - run it again in a new transaction", branch.name);
+	}
 }
 
 void DuckLakeBranchManager::CheckMaintenanceAgainstForks(DuckLakeTransaction &transaction) {
