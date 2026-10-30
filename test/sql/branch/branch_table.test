@@ -149,3 +149,57 @@ statement error
 FROM ducklake_branch_table('ducklake', NULL, 't')
 ----
 Branch and table name cannot be NULL
+
+# a prepared call is bound again on every EXECUTE, so it returns a column the branch added after PREPARE
+statement ok
+CREATE TABLE ducklake.w(a INTEGER)
+
+statement ok
+INSERT INTO ducklake.w VALUES (1)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'grow')
+
+statement ok
+PREPARE read_grow AS SELECT * FROM ducklake_branch_table('ducklake', 'grow', 'w')
+
+query II
+EXECUTE read_grow
+----
+0	1
+
+statement ok con2
+CALL ducklake_set_branch('ducklake', 'grow')
+
+statement ok con2
+ALTER TABLE ducklake.w ADD COLUMN z INTEGER DEFAULT 7
+
+query III
+EXECUTE read_grow
+----
+0	1	7
+
+# a column named rowid hides DuckDB's row id: the table is read without main's row ids
+statement ok
+CREATE TABLE ducklake.rid(rowid INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO ducklake.rid VALUES (5, 50)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'rid_branch')
+
+statement error
+FROM ducklake_branch_table('ducklake', 'rid_branch', 'rid')
+----
+has a column named rowid, which hides DuckDB's row id - read it with include_rowid => false
+
+query II
+FROM ducklake_branch_table('ducklake', 'rid_branch', 'rid', include_rowid => false)
+----
+5	50
+
+query III
+FROM ducklake_branch_table('ducklake', 'grow', 'w', include_rowid => true)
+----
+0	1	7
