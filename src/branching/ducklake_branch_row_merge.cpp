@@ -79,6 +79,16 @@ bool DuckLakeBranchManager::KeepsTableLevelRules(TableIndex table_id, bool branc
 	return branch_deleted_inlined && Contains(main_changes.tables_flushed_inlined, table_id);
 }
 
+//! Rows are matched by DuckDB's rowid, which a column of that name hides
+static bool HasRowIdColumn(CatalogEntry &entry) {
+	for (auto &column : entry.Cast<TableCatalogEntry>().GetColumns().Logical()) {
+		if (StringUtil::CIEquals(column.Name().GetIdentifierName(), "rowid")) {
+			return true;
+		}
+	}
+	return false;
+}
+
 map<TableIndex, DuckLakeRowMergeTable>
 DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, const DuckLakeLoadedBranch &loaded,
                                           DuckLakeSnapshot fork_snapshot,
@@ -136,6 +146,10 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		auto &schema = entry->ParentSchema().Cast<DuckLakeSchemaEntry>();
 		if (schema.ParentDuckLakeSchema()) {
 			// tables in nested schemas keep the table-level rules
+			continue;
+		}
+		if (HasRowIdColumn(*entry)) {
+			// so do tables with a column named rowid: their rows can't be matched
 			continue;
 		}
 		DuckLakeRowMergeTable table;

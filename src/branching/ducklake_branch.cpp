@@ -1799,6 +1799,34 @@ JOIN {METADATA_CATALOG}.ducklake_branching_branch b ON f.branch_id = b.branch_id
 WHERE b.status = 'active')";
 }
 
+string DuckLakeBranchManager::KnownFilesQuery(idx_t snapshot_id) {
+	// main's data and delete files resolved as DuckLakeMetadataManager::GetKnownFilesForCleanupQuery does; cleanup
+	// reads main's files in an earlier statement, which under READ COMMITTED can miss what a merge moved since
+	return ActiveBranchFilesQuery() + StringUtil::Format(R"(
+UNION ALL
+SELECT REPLACE(
+           CASE
+               WHEN NOT file_relative THEN file_path
+               ELSE CASE
+                        WHEN NOT table_relative THEN table_path || file_path
+                        ELSE CASE
+                                 WHEN NOT schema_relative THEN schema_path || table_path || file_path
+                                 ELSE {DATA_PATH} || schema_path || table_path || file_path
+                             END
+                   END
+           END,
+           '\', '/')
+FROM (SELECT s.path AS schema_path, t.path AS table_path, f.path AS file_path, s.path_is_relative AS schema_relative,
+             t.path_is_relative AS table_relative, f.path_is_relative AS file_relative
+      FROM (SELECT path, path_is_relative, table_id, begin_snapshot FROM {METADATA_CATALOG}.ducklake_data_file
+            UNION ALL
+            SELECT path, path_is_relative, table_id, begin_snapshot FROM {METADATA_CATALOG}.ducklake_delete_file) f
+      JOIN {METADATA_CATALOG}.ducklake_table t ON f.table_id = t.table_id
+      JOIN {METADATA_CATALOG}.ducklake_schema s ON t.schema_id = s.schema_id
+      WHERE f.begin_snapshot > %d) r)",
+	                                                     snapshot_id);
+}
+
 vector<idx_t> DuckLakeBranchManager::GetActiveForkSnapshots(DuckLakeTransaction &transaction) {
 	vector<idx_t> result;
 	if (!HasBranchTables(transaction)) {
@@ -1810,6 +1838,97 @@ vector<idx_t> DuckLakeBranchManager::GetActiveForkSnapshots(DuckLakeTransaction 
 		result.push_back(row.GetValue<idx_t>(0));
 	}
 	return result;
+}
+
+//! Rows of an inlined table that any of the given forks sees
+static string InlinedRowsAtForksQuery(DuckLakeTransaction &transaction, const DuckLakeInlinedTableInfo &inlined_table,
+                                      const vector<idx_t> &forks) {
+	// a row is pinned if any fork sees it: one deleted on main between two forks is still read by the older one
+	string fork_values;
+	for (auto fork : forks) {
+		fork_values += (fork_values.empty() ? "(" : ", (") + to_string(fork) + ")";
+	}
+	auto col_names = transaction.GetMetadataManager().InlinedColNames();
+	return StringUtil::Format(
+	    "SELECT 1 FROM {METADATA_CATALOG}.%s, (VALUES %s) forks(fork) WHERE %s <= fork AND (%s IS NULL OR %s > fork) "
+	    "LIMIT 1",
+	    inlined_table.table_name, fork_values, col_names.begin_snapshot, col_names.end_snapshot,
+	    col_names.end_snapshot);
+}
+
+bool DuckLakeBranchManager::IsInlinedTablePinned(DuckLakeTransaction &transaction,
+                                                 const DuckLakeInlinedTableInfo &inlined_table) {
+	auto forks = GetActiveForkSnapshots(transaction);
+	if (forks.empty()) {
+		return false;
+	}
+	auto result = RunBranchQuery(transaction, InlinedRowsAtForksQuery(transaction, inlined_table, forks),
+	                             "Failed to check inlined data against active branches: ");
+	for (auto &row : *result) {
+		(void)row;
+		return true;
+	}
+	return false;
+}
+
+//! Runs a metadata query returning one integer column on a new connection, so it reads what is committed now rather
+//! than the transaction's metadata snapshot. Nothing is returned when the branch tables don't exist.
+static vector<idx_t> QueryCommittedMetadata(DuckLakeTransaction &transaction, string query) {
+	auto &catalog = transaction.GetCatalog();
+	query = StringUtil::Replace(query, "{METADATA_CATALOG}",
+	                            DuckLakeUtil::SQLIdentifierToString(catalog.MetadataDatabaseName()) + "." +
+	                                DuckLakeUtil::SQLIdentifierToString(catalog.MetadataSchemaName()));
+	Connection connection(catalog.GetDatabase());
+	auto result = connection.Query(query);
+	vector<idx_t> values;
+	if (result->HasError()) {
+		if (result->GetErrorType() == ExceptionType::CATALOG) {
+			return values;
+		}
+		result->GetErrorObject().Throw("Failed to check DuckLake maintenance against active branches: ");
+	}
+	for (auto &row : *result) {
+		values.push_back(row.GetValue<idx_t>(0));
+	}
+	return values;
+}
+
+void DuckLakeBranchManager::CheckMaintenanceAgainstForks(DuckLakeTransaction &transaction) {
+	// the transaction's metadata snapshot is from before the commit, so it misses branches created since, and a
+	// flush has already removed the inlined rows in it
+	auto forks = QueryCommittedMetadata(transaction, ActiveForkSnapshotsQuery());
+	if (forks.empty()) {
+		return;
+	}
+	// the same rules as when the files and inlined rows were chosen, now against every fork at commit
+	auto newest_fork = *std::max_element(forks.begin(), forks.end());
+	auto &transaction_state = GetTransactionState(transaction);
+	{
+		auto &local_changes = transaction_state.local_changes;
+		lock_guard<mutex> guard(local_changes.lock);
+		for (auto &entry : local_changes.changes) {
+			for (auto &compaction : entry.second.compactions) {
+				if (compaction.type != CompactionType::MERGE_ADJACENT_TABLES) {
+					continue;
+				}
+				for (auto &source : compaction.source_files) {
+					if (source.file.begin_snapshot <= newest_fork) {
+						throw TransactionException("Transaction conflict - a branch forked at snapshot %d while "
+						                           "merging files it reads; run the compaction again",
+						                           newest_fork);
+					}
+				}
+			}
+		}
+	}
+	for (auto &flushed : transaction_state.flushed_inlined_tables) {
+		auto query = InlinedRowsAtForksQuery(transaction, flushed.inlined_table, forks);
+		if (!QueryCommittedMetadata(transaction, query).empty()) {
+			throw TransactionException("Transaction conflict - a branch forked at snapshot %d while flushing "
+			                           "inlined rows it reads; run the flush again",
+			                           newest_fork);
+		}
+	}
 }
 
 } // namespace duckdb

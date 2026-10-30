@@ -21,7 +21,7 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | | same, the immediate-mode condition | `&& !IsOnBranch(*transaction)` | a branch is loaded on first use, not at transaction start |
 | `src/storage/ducklake_transaction.cpp` | `GetSnapshot()`, at entry | `TryGetSnapshot(*this, branch_snapshot)` | a branch reads main at its fork, with the branch's changes loaded |
 | | `Commit()`, first statement in the `try` | `TryCommit(*this)` | commits to the branch, merges a branch into main, or closes a stale branch |
-| | `RunCommitLoop`, before `state->Commit` | `PrepareCommitLoop(*this, context)` | a merge, or the close of a stale branch, checks its branch on every attempt and records itself in the snapshot's batch |
+| | `RunCommitLoop`, before `state->Commit` | `PrepareCommitLoop(*this, context)` | a merge, or the close of a stale branch, checks its branch on every attempt and records itself in the snapshot's batch; a merge of adjacent files or a flush of inlined rows is checked against the forks committed by then (`CheckMaintenanceAgainstForks`, read on a new connection) |
 | | `DeleteSnapshots` | `DeleteSnapshots(*this, snapshots)` (replaces `metadata_manager.DeleteSnapshots`) | keeps the snapshots an open branch needs |
 | | `CreateEntry`, `DropEntry`, `AlterEntry`, at entry | `CheckCreate(*this, *entry)`, `CheckDrop(*this, entry)`, `CheckAlter(*this, entry, new_entry.get())` | refuse the catalog changes a branch does not support yet |
 | | `GetTransactionLocalSchemas`, `GetTransactionLocalSchema`, `GetCatalogVersion`, at entry | `EnsureLoaded(*this)` | a branch's catalog changes are loaded before the transaction's own schemas or its catalog version are read |
@@ -37,11 +37,11 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | `src/storage/ducklake_table_entry.cpp` | `DuckLakeTableEntry::CanUseGlobalStats` | `&& CanUseGlobalStats(transaction)` | same |
 | `src/storage/ducklake_multi_file_list.cpp` | `GetFilesForTable`, the local-deletes loop | `PrepareLocalDelete(...)` | a branch delete file already holds main's inlined file deletions |
 | | `GetCardinality`, when there are no stats | `return BranchCardinality(context, read_info.table)` (replaces `return nullptr`) | on a branch the planner still gets main's row count as an estimate |
-| `src/storage/ducklake_metadata_manager.cpp` | `GetOrphanFilesForCleanup`, after the known files are read | `AddKnownFiles(...)` | branch files are not orphans |
+| `src/storage/ducklake_metadata_manager.cpp` | `GetOrphanFilesForCleanup`, after the known files are read | `AddKnownFiles(...)` | branch files are not orphans, nor main files a merge moved there after main's files were read |
 | `src/functions/ducklake_expire_snapshots.cpp` | bind, after the "never the latest snapshot" filter | `filter += ExpirableSnapshotFilter(...)` | open branches pin their fork and every later snapshot |
 | | bind, after `DuckLakeTransaction::Get` | `EnsureNotOnBranch` | |
 | `src/functions/ducklake_flush_inlined_data.cpp` | bind, after `DuckLakeTransaction::Get` | `EnsureNotOnBranch` | |
-| | bind, the per-inlined-table loop | `if (IsInlinedTablePinned(...)) continue;` | inlined rows an open branch sees at its fork stay inlined |
+| | bind, the per-inlined-table loop | `if (IsInlinedTablePinned(...)) continue;` | inlined rows any open branch sees at its fork stay inlined |
 | `src/functions/ducklake_compaction_functions.cpp` | bind, after `DuckLakeTransaction::Get` | `EnsureNotOnBranch` | |
 | | after `GetFilesForCompaction` | `FilterCompactionCandidates(transaction, type, files)` | merging files never removes a file an open branch sees at its fork |
 | `src/functions/ducklake_cleanup_files.cpp` | bind, after `DuckLakeTransaction::Get` | `EnsureNotOnBranch` | |
