@@ -149,8 +149,9 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 			// tables in nested schemas keep the table-level rules
 			continue;
 		}
-		if (HasRowIdColumn(*entry)) {
-			// so do tables with a column named rowid: their rows can't be matched
+		// so do tables with a column named rowid on either side: their rows can't be matched
+		auto local_version = LocalTableVersion(transaction, table_id);
+		if (HasRowIdColumn(*entry) || (local_version && HasRowIdColumn(*local_version))) {
 			continue;
 		}
 		DuckLakeRowMergeTable table;
@@ -160,7 +161,6 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 		table.branch_name = table.main_name;
 		// a table renamed on the branch is read there under its new name; one whose columns the branch changed is
 		// compared on the branch's columns
-		auto local_version = LocalTableVersion(transaction, table_id);
 		if (local_version) {
 			table.branch_name = local_version->name.GetIdentifierName();
 			ProjectColumns(*local_version, entry->Cast<DuckLakeTableEntry>(), table.branch_columns, table.main_columns);
