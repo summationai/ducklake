@@ -383,3 +383,49 @@ c	33
 d	40
 e	55
 f	6
+
+# a prepared conflicts_only query is bound again on every EXECUTE, so it lists a conflict made after PREPARE
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE pc(i INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO pc VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE BRANCH pcb
+
+statement ok
+UPDATE pc SET v = 100 WHERE i = 1
+
+statement ok con2
+USE ducklake
+
+statement ok con2
+SET BRANCH pcb
+
+statement ok con2
+UPDATE pc SET v = 21 WHERE i = 2
+
+statement ok
+PREPARE conflicts AS SELECT rowid, branch_change, main_change FROM ducklake_merge_branch('ducklake', 'pcb', dry_run => true, table_name => 'pc', conflicts_only => true)
+
+query ITT
+EXECUTE conflicts
+----
+
+statement ok con2
+UPDATE pc SET v = 200 WHERE i = 1
+
+query ITT
+EXECUTE conflicts
+----
+0	update	update
+
+statement ok con2
+SET BRANCH main
+
+statement ok
+DROP BRANCH pcb
