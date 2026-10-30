@@ -70,6 +70,11 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		}
 		auto &table = entry->Cast<DuckLakeTableEntry>();
 		for (auto &column : table.GetColumns().Logical()) {
+			if (StringUtil::CIEquals(column.Name().GetIdentifierName(), "rowid")) {
+				throw InvalidInputException("Table \"%s\" has a column named rowid, which hides DuckDB's row id - its "
+				                            "rows can't be shown by row id; the merge applies table-level rules to it",
+				                            table_name);
+			}
 			result.column_names.push_back(column.Name().GetIdentifierName());
 			result.column_types.push_back(column.Type());
 		}

@@ -235,6 +235,8 @@ public:
 	static bool HasPinnedMaintenance(DuckLakeTransaction &transaction);
 	//! Fails the commit if a branch forked since the maintenance chose what it may remove and still reads it
 	static void CheckMaintenanceAgainstForks(DuckLakeTransaction &transaction);
+	//! Fails unless the branch's committed head is still the one the transaction loaded
+	static void EnsureBranchHeadCommitted(DuckLakeTransaction &transaction, const DuckLakeBranchInfo &branch);
 	static void CommitMerge(DuckLakeTransaction &transaction);
 	//! A summary of everything the transaction changed, to tell whether a statement added changes
 	static string ChangesFingerprint(DuckLakeTransaction &transaction);
