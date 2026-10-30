@@ -183,8 +183,13 @@ public:
 	static string ActiveForkSnapshotsQuery();
 	//! Query returning the full paths of all files owned by active branches
 	static string ActiveBranchFilesQuery();
+	//! The files orphan cleanup must keep beyond main's: those of active branches, plus main files committed after
+	//! the given snapshot, read in the same statement so a merge moving files to main in between is seen on one side
+	static string KnownFilesQuery(idx_t snapshot_id);
 	//! The fork snapshot ids of all active branches
 	static vector<idx_t> GetActiveForkSnapshots(DuckLakeTransaction &transaction);
+	//! Whether any active fork sees a row of the inlined table
+	static bool IsInlinedTablePinned(DuckLakeTransaction &transaction, const DuckLakeInlinedTableInfo &inlined_table);
 
 	static void ValidateBranchName(const string &name);
 	static void EnsureAutoCommit(ClientContext &context, const string &statement);
@@ -203,6 +208,10 @@ public:
 	//! The fork snapshot of the transaction's branch; loads the branch head on first use
 	static DuckLakeSnapshot GetBranchSnapshot(DuckLakeTransaction &transaction);
 	static void CommitToBranch(DuckLakeTransaction &transaction);
+	//! Whether a main transaction merges adjacent files or flushes inlined data, which active forks pin
+	static bool HasPinnedMaintenance(DuckLakeTransaction &transaction);
+	//! Fails the commit if a branch forked since the maintenance chose what it may remove and still reads it
+	static void CheckMaintenanceAgainstForks(DuckLakeTransaction &transaction);
 	static void CommitMerge(DuckLakeTransaction &transaction);
 	//! A summary of everything the transaction changed, to tell whether a statement added changes
 	static string ChangesFingerprint(DuckLakeTransaction &transaction);
