@@ -148,8 +148,8 @@ void ArchiveAndClose(Connection &connection, DuckLakeCatalog &catalog, const str
 		context.RunFunctionInTransaction([&]() { name = archive_name(source); });
 		auto target = BranchTableSql(catalog_name, archive_schema, name);
 		RunBranchSql(connection, StringUtil::Format(
-		                             "CREATE TABLE %s AS SELECT * EXCLUDE (rowid) FROM ducklake_branch_table(%s, %s, "
-		                             "%s, schema => %s)",
+		                             "CREATE TABLE %s AS SELECT * FROM ducklake_branch_table(%s, %s, %s, schema => %s, "
+		                             "include_rowid => false)",
 		                             target, SqlLiteral(catalog_name), SqlLiteral(info.name),
 		                             SqlLiteral(source.table_name), SqlLiteral(source.schema_name)));
 		RunBranchSql(connection, StringUtil::Format("COMMENT ON TABLE %s IS %s", target, SqlLiteral(comment)));

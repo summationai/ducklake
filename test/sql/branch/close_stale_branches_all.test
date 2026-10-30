@@ -117,3 +117,39 @@ SELECT SUM(i) FROM query_table(getvariable('pair_archive'))
 # the names are free again
 statement ok
 CREATE BRANCH b1
+
+# a table with a column named rowid is archived with all its columns
+statement ok
+SET BRANCH main
+
+statement ok
+CREATE TABLE rid(rowid INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO rid VALUES (5, 50)
+
+statement ok
+CREATE BRANCH ridb
+
+statement ok
+SET BRANCH ridb
+
+statement ok
+INSERT INTO rid VALUES (6, 60)
+
+statement ok
+SET BRANCH main
+
+query TT
+SELECT branch_name, status FROM ducklake_close_stale_branches('ducklake', older_than => now() + INTERVAL 1 DAY) WHERE branch_name = 'ridb'
+----
+ridb	closed
+
+statement ok
+SET VARIABLE rid_archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND regexp_full_match(table_name, 'ridb__rid__[0-9]{8}'))
+
+query II
+SELECT rowid, v FROM query_table(getvariable('rid_archive')) ORDER BY v
+----
+5	50
+6	60
