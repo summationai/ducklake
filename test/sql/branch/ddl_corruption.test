@@ -171,6 +171,21 @@ statement ok
 SET VARIABLE missing_parent_column = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_parent_column')
 
 statement ok
+CREATE BRANCH duplicate_column
+
+statement ok
+SET BRANCH duplicate_column
+
+statement ok
+CREATE TABLE x(s STRUCT(a INTEGER))
+
+statement ok
+SET BRANCH main
+
+statement ok
+SET VARIABLE duplicate_column = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'duplicate_column')
+
+statement ok
 CREATE BRANCH bad_nested_type
 
 statement ok
@@ -338,6 +353,21 @@ statement error
 SELECT COUNT(*) FROM t
 ----
 Branch "missing_parent_column" has a column whose parent column is missing
+
+statement ok
+SET BRANCH main
+
+# a second column with the root's id under the leaf would make the column tree loop
+statement ok
+INSERT INTO ducklake_meta.ducklake_branching_column SELECT branch_id, begin_seq, object_id, (SELECT column_id FROM ducklake_meta.ducklake_branching_column WHERE branch_id = getvariable('duplicate_column') AND parent_column IS NULL), column_id, column_order, 'b', column_type, initial_default, default_value, default_value_type, nulls_allowed, comment FROM ducklake_meta.ducklake_branching_column WHERE branch_id = getvariable('duplicate_column') AND parent_column IS NOT NULL
+
+statement ok
+SET BRANCH duplicate_column
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Branch "duplicate_column" has two columns with id
 
 statement ok
 SET BRANCH main
