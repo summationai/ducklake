@@ -41,6 +41,8 @@ enum class CompactionType;
 //! call sites in docs/branching/TOUCHPOINTS.md); everything else about branches lives in src/branching.
 class DuckLakeBranching {
 public:
+	//! ducklake_extension.cpp, before anything is registered - fails the load on an invalid DUCKLAKE_BRANCH_SYNTAX
+	static void CheckLoadSettings();
 	//! ducklake_extension.cpp - the branch functions and the CREATE/SET/DROP/MERGE BRANCH statements
 	static void Register(ExtensionLoader &loader, DBConfig &config);
 

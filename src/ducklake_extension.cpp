@@ -20,6 +20,7 @@ ScalarFunction DuckLakeMurmur3Function();
 ScalarFunction DuckLakeUnreadableMacroDefaultFunction();
 
 static void LoadInternal(ExtensionLoader &loader) {
+	DuckLakeBranching::CheckLoadSettings();
 	loader.SetDescription("Adds support for DuckLake, SQL as a Lakehouse Format");
 
 	auto &instance = loader.GetDatabaseInstance();

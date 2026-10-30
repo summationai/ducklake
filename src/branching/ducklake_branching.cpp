@@ -35,6 +35,11 @@ static bool BranchSyntaxEnabled() {
 	throw InvalidInputException("DUCKLAKE_BRANCH_SYNTAX must be \"on\" or \"off\", not \"%s\"", value);
 }
 
+void DuckLakeBranching::CheckLoadSettings() {
+	// a failed load keeps what it registered, so a retry with a corrected value would fail on it
+	BranchSyntaxEnabled();
+}
+
 void DuckLakeBranching::Register(ExtensionLoader &loader, DBConfig &config) {
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetCreateBranchFunction());
 	loader.RegisterFunction(DuckLakeBranchFunctions::GetDropBranchFunction());
