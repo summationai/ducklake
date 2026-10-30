@@ -126,3 +126,61 @@ query II
 SELECT COUNT(*), SUM(i) FROM t
 ----
 22	493
+
+# rows main deleted between two forks stay pinned while the older branch is open
+statement ok
+CREATE TABLE v(i INTEGER)
+
+statement ok
+INSERT INTO v VALUES (1), (2)
+
+statement ok
+CREATE BRANCH older
+
+statement ok
+SET BRANCH older
+
+statement ok
+DELETE FROM v WHERE i = 1
+
+statement ok
+SET BRANCH main
+
+statement ok
+DELETE FROM v
+
+statement ok
+CREATE BRANCH newer
+
+# nothing of v is visible at newer's fork, but older still reads row 2 from the inlined table
+query I
+SELECT COUNT(*) FROM ducklake_flush_inlined_data('ducklake') WHERE table_name = 'v'
+----
+0
+
+statement ok
+SET BRANCH older
+
+query I
+SELECT i FROM v
+----
+2
+
+statement ok
+SET BRANCH main
+
+statement ok
+DROP BRANCH older
+
+statement ok
+DROP BRANCH newer
+
+query I
+SELECT COUNT(*) FROM ducklake_flush_inlined_data('ducklake') WHERE table_name = 'v'
+----
+1
+
+query I
+SELECT COUNT(*) FROM v
+----
+0
