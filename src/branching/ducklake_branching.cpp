@@ -113,6 +113,12 @@ void DuckLakeBranching::PrepareCommitLoop(DuckLakeTransaction &transaction, Duck
 		return;
 	}
 	if (!state || !state->merge) {
+		if (!IsOnBranch(transaction) && DuckLakeBranchManager::HasPinnedMaintenance(transaction)) {
+			// a branch created while this transaction ran may read what the maintenance removes
+			context.pre_commit_check = [&transaction](const SnapshotChangeInformation &) {
+				DuckLakeBranchManager::CheckMaintenanceAgainstForks(transaction);
+			};
+		}
 		return;
 	}
 	// a merge starts at the fork snapshot: its checks run on every attempt, its bookkeeping commits with it
@@ -253,30 +259,7 @@ void DuckLakeBranching::FilterCompactionCandidates(DuckLakeTransaction &transact
 
 bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
                                              const DuckLakeInlinedTableInfo &inlined_table) {
-	auto forks = DuckLakeBranchManager::GetActiveForkSnapshots(transaction);
-	if (forks.empty()) {
-		return false;
-	}
-	// a row is pinned if any fork sees it: one deleted on main between two forks is still read by the older one
-	string fork_values;
-	for (auto fork : forks) {
-		fork_values += (fork_values.empty() ? "(" : ", (") + to_string(fork) + ")";
-	}
-	auto &metadata_manager = transaction.GetMetadataManager();
-	auto col_names = metadata_manager.InlinedColNames();
-	auto result = metadata_manager.Query(StringUtil::Format(
-	    "SELECT 1 FROM {METADATA_CATALOG}.%s, (VALUES %s) forks(fork) WHERE %s <= fork AND (%s IS NULL OR %s > fork) "
-	    "LIMIT 1",
-	    inlined_table.table_name, fork_values, col_names.begin_snapshot, col_names.end_snapshot,
-	    col_names.end_snapshot));
-	if (result->HasError()) {
-		result->GetErrorObject().Throw("Failed to check inlined data against active branches: ");
-	}
-	for (auto &row : *result) {
-		(void)row;
-		return true;
-	}
-	return false;
+	return DuckLakeBranchManager::IsInlinedTablePinned(transaction, inlined_table);
 }
 
 void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, unordered_set<string> &known_files,
@@ -285,7 +268,8 @@ void DuckLakeBranching::AddKnownFiles(DuckLakeTransaction &transaction, unordere
 		return;
 	}
 	// files written on active branches are not listed in the main file tables
-	auto result = transaction.GetMetadataManager().Query(DuckLakeBranchManager::ActiveBranchFilesQuery());
+	auto result = transaction.GetMetadataManager().Query(
+	    DuckLakeBranchManager::KnownFilesQuery(transaction.GetSnapshot().snapshot_id));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to get branch files from DuckLake: ");
 	}
