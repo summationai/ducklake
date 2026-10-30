@@ -160,3 +160,36 @@ query I
 SELECT COUNT(*) FROM nested.outer_s.inner_s.t
 ----
 99
+
+# a table with a column named rowid hides DuckDB's row id, so its rows can't be matched: table-level rules
+statement ok
+CREATE TABLE ducklake.rid(rowid INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO ducklake.rid VALUES (0, 10), (5, 50)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'rb')
+
+statement ok
+UPDATE ducklake.rid SET rowid = 1 WHERE v = 10
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'rb')
+
+statement ok
+UPDATE ducklake.rid SET rowid = 2 WHERE v = 10
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'rb')
+----
+Transaction conflict
+
+query II
+SELECT rowid, v FROM ducklake.rid ORDER BY v
+----
+1	10
+5	50

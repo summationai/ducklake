@@ -191,6 +191,26 @@ void DuckLakeBranchManager::CommitToBranch(DuckLakeTransaction &transaction) {
 	CommitBranch(transaction, *state.loaded_branch);
 }
 
+//===--------------------------------------------------------------------===//
+// Main maintenance against forks created while it ran
+//===--------------------------------------------------------------------===//
+bool DuckLakeBranchManager::HasPinnedMaintenance(DuckLakeTransaction &transaction) {
+	auto &transaction_state = GetTransactionState(transaction);
+	if (!transaction_state.flushed_inlined_tables.empty()) {
+		return true;
+	}
+	auto &local_changes = transaction_state.local_changes;
+	lock_guard<mutex> guard(local_changes.lock);
+	for (auto &entry : local_changes.changes) {
+		for (auto &compaction : entry.second.compactions) {
+			if (compaction.type == CompactionType::MERGE_ADJACENT_TABLES) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 string DuckLakeBranchManager::ChangesFingerprint(DuckLakeTransaction &transaction) {
 	auto &state = GetTransactionState(transaction);
 	auto result = StringUtil::Format("%d/%d/%d/%d/%d/%d", state.SchemaChangesMade(), state.dropped_files.size(),
