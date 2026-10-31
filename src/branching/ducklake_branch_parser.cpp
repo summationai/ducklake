@@ -211,15 +211,13 @@ static ParserExtensionPlanResult DuckLakeBranchPlan(ParserExtensionInfo *info, C
 		result.function = DuckLakeBranchFunctions::GetCreateBranchFunction();
 		break;
 	case DuckLakeBranchStatementType::MERGE_BRANCH:
-		result.function = DuckLakeBranchFunctions::GetMergeBranchFunction();
+		result.function = DuckLakeBranchFunctions::GetMergeBranchFunction(!data.keep_on_conflict.empty());
 		if (!data.keep_on_conflict.empty()) {
-			result.function.arguments.push_back(LogicalType::VARCHAR);
 			result.parameters.push_back(Value(data.keep_on_conflict));
 		}
 		break;
 	case DuckLakeBranchStatementType::DROP_BRANCH:
-		result.function = DuckLakeBranchFunctions::GetDropBranchFunction();
-		result.function.arguments.push_back(LogicalType::BOOLEAN);
+		result.function = DuckLakeBranchFunctions::GetDropBranchFunction(true);
 		result.parameters.push_back(Value::BOOLEAN(data.if_exists));
 		break;
 	default:

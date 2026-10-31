@@ -415,7 +415,7 @@ unique_ptr<DuckLakeFieldId> ColumnFieldId(const DuckLakeColumnInfo &col) {
 		if (col.default_value.IsNull()) {
 			col_data.default_value = ConstantExpression::Null();
 		} else if (col.default_value_type == "expression") {
-			auto expressions = Parser::ParseExpressionList(col.default_value.GetValue<string>());
+			auto expressions = Parser::GetBuiltinParser().ParseExpressionList(col.default_value.GetValue<string>());
 			if (expressions.size() != 1) {
 				throw InvalidInputException("Branch column \"%s\" has an invalid default", col.name);
 			}
