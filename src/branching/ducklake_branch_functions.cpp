@@ -3,6 +3,8 @@
 #include "duckdb/main/client_context.hpp"
 #include "branching/ducklake_branch.hpp"
 #include "branching/ducklake_branch_merge_rows.hpp"
+#include "common/index.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 
@@ -273,8 +275,7 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 		    DuckLakeMergeRowsScan::Bind(context, result->catalog, result->branch_name, schema_name,
 		                                table_name->second.GetValue<string>(), on_conflict, conflicts_only));
 		if (conflicts_only) {
-			// one row per row both sides changed differently: what each did, and the row at the fork and on each side
-			auto row_type = result->rows->RowType();
+			// one row per row both sides changed differently and what each did; ducklake_branch_table has the values
 			names.emplace_back("rowid");
 			return_types.emplace_back(LogicalType::BIGINT);
 			names.emplace_back("branch_change");
@@ -283,12 +284,6 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 			return_types.emplace_back(LogicalType::VARCHAR);
 			names.emplace_back("resolution");
 			return_types.emplace_back(LogicalType::VARCHAR);
-			names.emplace_back("fork");
-			return_types.push_back(row_type);
-			names.emplace_back("branch");
-			return_types.push_back(row_type);
-			names.emplace_back("main");
-			return_types.push_back(row_type);
 			return std::move(result);
 		}
 		// what the merge would do to the table's rows, in the terms of ducklake_table_changes
@@ -405,6 +400,133 @@ static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_
 	output.data[2].Append(Value::UBIGINT(branch.head_seq));
 	output.SetChildCardinality(1);
 	state.started = true;
+}
+
+//===--------------------------------------------------------------------===//
+// ducklake_branch_table
+//===--------------------------------------------------------------------===//
+//! A table as a branch has it, read from any branch (main included): its rows with their row ids on main, so that
+//! they can be joined with main's rows, e.g. to merge by hand
+struct DuckLakeBranchTableData : public TableFunctionData {
+	string catalog_name;
+	string branch_name;
+	string schema_name;
+	string table_name;
+	//! Whether the first column is the row id on main
+	bool include_rowid = true;
+	//! The types bound, which the branch must still have when the table is read
+	vector<LogicalType> types;
+
+	//! The branch can change between PREPARE and EXECUTE, so a prepared call is bound again every time
+	bool SupportStatementCache() const override {
+		return false;
+	}
+};
+
+struct DuckLakeBranchTableState : public GlobalTableFunctionState {
+	//! The connection reading the branch outlives its result
+	unique_ptr<Connection> connection;
+	unique_ptr<QueryResult> result;
+};
+
+static unique_ptr<FunctionData> BranchTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &catalog = GetBranchCatalog(context, input.inputs[0]);
+	if (input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
+		throw InvalidInputException("Branch and table name cannot be NULL");
+	}
+	auto result = make_uniq<DuckLakeBranchTableData>();
+	result->catalog_name = catalog.GetName().GetIdentifierName();
+	result->branch_name = input.inputs[1].GetValue<string>();
+	result->table_name = input.inputs[2].GetValue<string>();
+	result->schema_name = "main";
+	auto schema = input.named_parameters.find("schema");
+	if (schema != input.named_parameters.end() && !schema->second.IsNull()) {
+		result->schema_name = schema->second.GetValue<string>();
+	}
+	auto include_rowid = input.named_parameters.find("include_rowid");
+	if (include_rowid != input.named_parameters.end() && !include_rowid->second.IsNull()) {
+		result->include_rowid = BooleanValue::Get(include_rowid->second);
+	}
+	vector<string> column_names;
+	vector<LogicalType> column_types;
+	BranchTableColumns(context, result->catalog_name, result->branch_name, result->schema_name, result->table_name,
+	                   column_names, column_types);
+	if (result->include_rowid) {
+		for (auto &column_name : column_names) {
+			if (StringUtil::CIEquals(column_name, "rowid")) {
+				throw InvalidInputException("Table \"%s\" has a column named rowid, which hides DuckDB's row id - read "
+				                            "it with include_rowid => false",
+				                            result->table_name);
+			}
+		}
+		// the row id on main: a row the branch inserted has none yet
+		names.emplace_back("rowid");
+		return_types.emplace_back(LogicalType::BIGINT);
+	}
+	for (idx_t column = 0; column < column_names.size(); column++) {
+		names.emplace_back(column_names[column]);
+		return_types.push_back(column_types[column]);
+	}
+	result->types = return_types;
+	return std::move(result);
+}
+
+static unique_ptr<GlobalTableFunctionState> BranchTableInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<DuckLakeBranchTableData>();
+	auto result = make_uniq<DuckLakeBranchTableState>();
+	result->connection = BranchSqlConnection(context, data.catalog_name, data.branch_name);
+	result->result =
+	    result->connection->Submit(string(data.include_rowid ? "SELECT rowid, * FROM " : "SELECT * FROM ") +
+	                               BranchTableSql(data.catalog_name, data.schema_name, data.table_name));
+	if (result->result->HasError()) {
+		result->result->GetErrorObject().Throw();
+	}
+	return std::move(result);
+}
+
+static void BranchTableExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->Cast<DuckLakeBranchTableData>();
+	auto &state = data_p.global_state->Cast<DuckLakeBranchTableState>();
+	auto chunk = state.result->Fetch();
+	if (!chunk) {
+		output.SetCardinality(0);
+		return;
+	}
+	// the branch's columns are read again here: a change committed since the bind no longer fits its output
+	if (chunk->GetTypes() != data.types) {
+		throw InvalidInputException("The columns of table \"%s\" on branch \"%s\" changed while it was read - run the "
+		                            "query again",
+		                            data.table_name, data.branch_name);
+	}
+	idx_t first_column = data.include_rowid ? 1 : 0;
+	for (idx_t column = first_column; column < chunk->ColumnCount(); column++) {
+		output.data[column].Reference(chunk->data[column]);
+	}
+	if (!data.include_rowid) {
+		output.SetCardinality(chunk->size());
+		return;
+	}
+	auto &row_ids = output.data[0];
+	auto row_id_data = FlatVector::GetDataMutable<int64_t>(row_ids);
+	auto &validity = FlatVector::ValidityMutable(row_ids);
+	for (idx_t row = 0; row < chunk->size(); row++) {
+		auto row_id = chunk->GetValue(0, row).GetValue<int64_t>();
+		if (DuckLakeConstants::IsTransactionLocalRowId(row_id)) {
+			validity.SetInvalid(row);
+		} else {
+			row_id_data[row] = row_id;
+		}
+	}
+	output.SetCardinality(chunk->size());
+}
+
+TableFunction DuckLakeBranchFunctions::GetBranchTableFunction() {
+	TableFunction function("ducklake_branch_table", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                       BranchTableExecute, BranchTableBind, BranchTableInit);
+	function.named_parameters["schema"] = LogicalType::VARCHAR;
+	function.named_parameters["include_rowid"] = LogicalType::BOOLEAN;
+	return function;
 }
 
 TableFunction DuckLakeBranchFunctions::GetMergeBranchFunction() {
