@@ -54,13 +54,13 @@ public:
 	static bool IsOnBranch(DuckLakeTransaction &transaction);
 	//! Throws for an operation a branch does not support
 	static void EnsureNotOnBranch(DuckLakeTransaction &transaction, const char *operation);
-	//! DuckLakeTransaction::GetSnapshot - a branch transaction reads main at its fork, with the branch loaded
+	//! DuckLakeTransaction::GetLatestSnapshot - a branch transaction reads main at its fork, with the branch loaded
 	static bool TryGetSnapshot(DuckLakeTransaction &transaction, DuckLakeSnapshot &result);
 	//! DuckLakeTransaction::Commit - commits to a branch, or merges a branch into main
 	static bool TryCommit(DuckLakeTransaction &transaction);
 	//! DuckLakeTransaction::RunCommitLoop - a merge checks its branch and records itself in each attempt
 	static void PrepareCommitLoop(DuckLakeTransaction &transaction, DuckLakeCommitContext &context);
-	//! DuckLakeTransaction::DeleteSnapshots - keeps the snapshots an open branch needs
+	//! DuckLakeTransaction::DeleteSnapshots / Commit - keeps the snapshots an open branch needs
 	static void DeleteSnapshots(DuckLakeTransaction &transaction, const vector<DuckLakeSnapshotInfo> &snapshots);
 
 	//===--------------------------------------------------------------------===//
@@ -90,12 +90,11 @@ public:
 	                           DuckLakeDeleteFile &delete_file);
 	//! DuckLakeDelete::TryDropFullyDeletedFile - files of earlier branch commits stay, so later row ids do not shift
 	static bool KeepsLocalFile(DuckLakeTransaction &transaction, TableIndex table_id, const string &path);
-	//! DuckLakeMultiFileList::GetFilesForTable - a branch delete file already holds main's inlined file deletions
+	//! DuckLakeMultiFileList::ApplyLocalChanges - a branch delete file already holds main's inlined file deletions
 	static void PrepareLocalDelete(DuckLakeTransaction &transaction, TableIndex table_id,
 	                               DuckLakeFileListEntry &file_entry);
 	//! LocalTableChanges - delete files of earlier branch commits are never removed by this transaction
 	static void RemoveDeleteFile(FileSystem &fs, const DuckLakeDeleteFile &file);
-	static void TryRemoveDeleteFile(FileSystem &fs, const DuckLakeDeleteFile &file);
 	static bool OwnsDeleteFile(const DuckLakeDeleteFile &file);
 
 	//===--------------------------------------------------------------------===//

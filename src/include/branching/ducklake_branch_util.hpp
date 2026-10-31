@@ -17,7 +17,7 @@ namespace duckdb {
 
 //! Runs a query on the metadata catalog and throws with the given prefix when it fails
 inline unique_ptr<QueryResult> RunBranchQuery(DuckLakeTransaction &transaction, string query, const string &error) {
-	auto result = transaction.Query(std::move(query));
+	auto result = transaction.GetMetadataManager().Query(std::move(query));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw(error);
 	}

@@ -37,8 +37,9 @@ SnapshotChangeInformation DuckLakeBranchManager::MainChangesSince(DuckLakeTransa
 		return result;
 	};
 	SnapshotAndStats snapshot_and_stats;
-	auto changes = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(
-	    snapshot_and_stats, executor, transaction.GetCatalog().SupportsV1_1Metadata());
+	auto query =
+	    metadata_manager.GetSnapshotAndStatsAndChangesQuery(snapshot, transaction.GetCatalog().SupportsV1_1Metadata());
+	auto changes = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor, query);
 	return SnapshotChangeInformation::ParseChangesMade(changes.changes_made);
 }
 
@@ -96,12 +97,12 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 	auto &state = *transaction.state;
 	set<TableIndex> branch_tables, branch_deleted, branch_deleted_inlined;
 	for (auto &entry : state.local_changes.Changes()) {
-		auto table_id = entry.GetTableIndex();
+		auto table_id = entry.first;
 		if (IsTransactionLocal(table_id)) {
 			// a table the branch created: main has no rows of it
 			continue;
 		}
-		auto &changes = entry.GetTableChanges();
+		auto &changes = entry.second;
 		branch_tables.insert(table_id);
 		if (!changes.new_delete_files.empty()) {
 			branch_deleted.insert(table_id);
@@ -177,10 +178,10 @@ void DuckLakeBranchManager::ProjectColumns(const DuckLakeTableEntry &branch_vers
 	bool same = branch_version.GetColumns().LogicalColumnCount() == main_version.GetColumns().LogicalColumnCount();
 	for (auto &column : branch_version.GetColumns().Logical()) {
 		auto &field = branch_fields.GetByRootIndex(column.Physical());
-		branch_columns.push_back(DuckLakeUtil::SQLIdentifierToString(column.Name().GetIdentifierName()));
+		branch_columns.push_back(SQLQuotedIdentifier::ToString(column.Name().GetIdentifierName()));
 		auto main_field = main_fields.GetByFieldIndex(field.GetFieldIndex());
 		if (main_field) {
-			main_columns.push_back(DuckLakeUtil::SQLIdentifierToString(main_field->Name()));
+			main_columns.push_back(SQLQuotedIdentifier::ToString(main_field->Name()));
 			continue;
 		}
 		// a column the branch added: main's rows read it as its initial default, as DuckLake's reader does
@@ -295,9 +296,9 @@ void DuckLakeBranchManager::PlanRowMerge(ClientContext &context, const string &c
 	auto deletions = RunBranchSql(
 	    *main_connection,
 	    StringUtil::Format("SELECT DISTINCT rowid FROM ducklake_table_deletions(%s, %s, %s, %d, %d)",
-	                       DuckLakeUtil::SQLLiteralToString(catalog_name),
-	                       DuckLakeUtil::SQLLiteralToString(table.schema_name),
-	                       DuckLakeUtil::SQLLiteralToString(table.main_name), fork_snapshot_id + 1, head_snapshot_id));
+	                       SQLString::ToString(catalog_name),
+	                       SQLString::ToString(table.schema_name),
+	                       SQLString::ToString(table.main_name), fork_snapshot_id + 1, head_snapshot_id));
 	for (auto &row : *deletions) {
 		auto row_id = row.GetValue<int64_t>(0);
 		if (branch_touched.find(row_id) != branch_touched.end()) {
@@ -391,7 +392,7 @@ string DuckLakeBranchManager::RowConflictMessage(const string &catalog_name, con
 		rows += ", ...";
 	}
 	auto literal = [](const string &text) {
-		return DuckLakeUtil::SQLLiteralToString(text);
+		return SQLString::ToString(text);
 	};
 	auto schema = table.schema_name == DEFAULT_SCHEMA ? string() : ", schema => " + literal(table.schema_name);
 	auto catalog_and_branch = literal(catalog_name) + ", " + literal(branch_name);

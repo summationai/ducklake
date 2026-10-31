@@ -77,7 +77,8 @@ DELETE FROM renamed WHERE i = 2
 statement ok
 ALTER TABLE renamed RENAME TO renamed_on_main
 
-# the files main added since the fork are compacted; the file the branch reads at its fork is not
+# the files main added since the fork are compacted; the file the branch reads at its fork is not, so DuckLake,
+# which checks compactions per file, reports main's inserts as the conflict
 statement ok
 INSERT INTO compacted VALUES (4)
 
@@ -92,7 +93,7 @@ query TTT
 SELECT table_name, status, regexp_extract(conflict, 'another transaction has [a-z ]+') FROM ducklake_merge_branch('ducklake', 'b_altered', dry_run => true) UNION ALL SELECT table_name, status, regexp_extract(conflict, 'another transaction has [a-z ]+') FROM ducklake_merge_branch('ducklake', 'b_renamed', dry_run => true) UNION ALL SELECT table_name, status, regexp_extract(conflict, 'another transaction has [a-z ]+') FROM ducklake_merge_branch('ducklake', 'b_compacted', dry_run => true) ORDER BY 1
 ----
 altered	conflict	another transaction has altered it
-compacted	conflict	another transaction has compacted it
+compacted	conflict	another transaction has inserted into it
 renamed	conflict	another transaction has deleted from it
 
 query IIII
@@ -118,7 +119,7 @@ but another transaction has deleted from it
 statement error
 MERGE BRANCH b_compacted
 ----
-but another transaction has compacted it
+but another transaction has inserted into it
 
 query II
 FROM altered ORDER BY i
@@ -143,7 +144,7 @@ FROM compacted ORDER BY i
 
 # nested schemas, on a lake with 1.1 metadata; main's delete is inlined unless inlining is off
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1-dev1', DATA_PATH '{DATA_PATH}/merge_rows_table_level_nested_files', METADATA_CATALOG 'nested_meta')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_nested' AS nested (DUCKLAKE_VERSION '1.1', DATA_PATH '{DATA_PATH}/merge_rows_table_level_nested_files', METADATA_CATALOG 'nested_meta')
 
 statement ok
 CREATE SCHEMA nested.outer_s
@@ -168,6 +169,12 @@ CALL ducklake_set_branch('nested', 'main')
 
 statement ok
 DELETE FROM nested.outer_s.inner_s.t WHERE i = 2
+
+# the dry run checks the branch's deletes against main's inlined ones, as the merge does
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('nested', 'nb', dry_run => true)
+----
+t	conflict
 
 statement error
 CALL ducklake_merge_branch('nested', 'nb')

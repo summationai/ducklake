@@ -53,7 +53,7 @@ vector<DuckLakeBranchInfo> DuckLakeBranchManager::GetBranchesWithActivity(DuckLa
 namespace {
 
 string SqlLiteral(const string &value) {
-	return DuckLakeUtil::SQLLiteralToString(value);
+	return SQLString::ToString(value);
 }
 
 string JsonString(const string &value) {
@@ -137,8 +137,8 @@ void ArchiveAndClose(Connection &connection, DuckLakeCatalog &catalog, const str
 	// the archive tables and the close commit together, or not at all
 	RunBranchSql(connection, "BEGIN TRANSACTION");
 	if (!sources.empty()) {
-		RunBranchSql(connection, "CREATE SCHEMA IF NOT EXISTS " + DuckLakeUtil::SQLIdentifierToString(catalog_name) +
-		                             "." + DuckLakeUtil::SQLIdentifierToString(archive_schema));
+		RunBranchSql(connection, "CREATE SCHEMA IF NOT EXISTS " + SQLQuotedIdentifier::ToString(catalog_name) +
+		                             "." + SQLQuotedIdentifier::ToString(archive_schema));
 	}
 	auto comment =
 	    StringUtil::Format("Archived from branch \"%s\" (last activity %s, fork snapshot %d) on %s", info.name,
@@ -264,12 +264,13 @@ string DuckLakeBranchManager::CloseBookkeepingSql(DuckLakeTransaction &transacti
 	    "head_seq = %d AND status = 'closed');\n",
 	    id, SqlLiteral(info.name), info.fork_snapshot_id, info.head_seq, info.next_file_seq, id, closed_seq);
 	// the branch's history stays, ending with the close
-	string changes_made = with_snapshot ? "closed:{SNAPSHOT_ID}" : "closed";
+	// placeholders are only replaced outside literals, so the snapshot id is appended to the literal
+	string changes_made = with_snapshot ? "'closed:' || CAST({SNAPSHOT_ID} AS VARCHAR)" : SqlLiteral("closed");
 	sql +=
 	    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_branching_commit VALUES (%d, %d, NOW(), %s, %s, "
 	                       "%s, %s);\n",
 	                       id, closed_seq, commit_info.author.ToSQLString(), commit_info.commit_message.ToSQLString(),
-	                       commit_info.commit_extra_info.ToSQLString(), SqlLiteral(changes_made));
+	                       commit_info.commit_extra_info.ToSQLString(), changes_made);
 	sql += ScheduleBranchFilesSql(id);
 	sql += DeleteBranchRowsSql(transaction, id, false, close.has_column_change_table);
 	return sql;
