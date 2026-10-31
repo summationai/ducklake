@@ -16,7 +16,8 @@ git diff --stat <upstream release> -- src ':!src/branching' ':!src/include/branc
 | Upstream file | Function | Call | What it does |
 | --- | --- | --- | --- |
 | `src/CMakeLists.txt` | | `add_subdirectory(branching)` | builds `src/branching/` |
-| `src/ducklake_extension.cpp` | `LoadInternal`, at the end | `Register(loader, config)` | the branch functions and the `CREATE/SET/DROP/MERGE BRANCH` parser extension |
+| `src/ducklake_extension.cpp` | `LoadInternal`, first statement | `CheckLoadSettings()` | an invalid `DUCKLAKE_BRANCH_SYNTAX` fails the load before anything is registered, so a retry can succeed |
+| | `LoadInternal`, at the end | `Register(loader, config)` | the branch functions and, unless `DUCKLAKE_BRANCH_SYNTAX=off`, the `CREATE/SET/DROP/MERGE BRANCH` parser extension |
 | `src/storage/ducklake_transaction_manager.cpp` | `StartTransaction`, after `Start()` | `OnTransactionStart(*transaction, context)` | puts the transaction on the connection's selected branch |
 | | same, the immediate-mode condition | `&& !IsOnBranch(*transaction)` | a branch is loaded on first use, not at transaction start |
 | `src/storage/ducklake_transaction.cpp` | `GetSnapshot()`, at entry | `TryGetSnapshot(*this, branch_snapshot)` | a branch reads main at its fork, with the branch's changes loaded |
