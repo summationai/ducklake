@@ -1889,8 +1889,8 @@ bool DuckLakeBranchManager::IsInlinedTablePinned(DuckLakeTransaction &transactio
 static vector<idx_t> QueryCommittedMetadata(DuckLakeTransaction &transaction, string query) {
 	auto &catalog = transaction.GetCatalog();
 	query = StringUtil::Replace(query, "{METADATA_CATALOG}",
-	                            DuckLakeUtil::SQLIdentifierToString(catalog.MetadataDatabaseName()) + "." +
-	                                DuckLakeUtil::SQLIdentifierToString(catalog.MetadataSchemaName()));
+	                            SQLQuotedIdentifier::ToString(catalog.MetadataDatabaseName()) + "." +
+	                                SQLQuotedIdentifier::ToString(catalog.MetadataSchemaName()));
 	Connection connection(catalog.GetDatabase());
 	auto result = connection.Query(query);
 	vector<idx_t> values;
