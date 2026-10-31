@@ -1,5 +1,6 @@
 #include "functions/ducklake_table_functions.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "common/ducklake_util.hpp"
@@ -1234,6 +1235,7 @@ vector<DuckLakeDataFile> DuckLakeFileProcessor::AddFiles(const vector<string> &g
 static void DuckLakeAddDataFilesExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<DuckLakeAddDataFilesData>();
 	auto &transaction = DuckLakeTransaction::Get(context, bind_data.catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Adding data files");
 	DuckLakeFileProcessor processor(transaction, context, bind_data);
 	auto files_to_add = processor.AddFiles(bind_data.globs);
 	transaction.AppendFiles(bind_data.table.GetTableId(), std::move(files_to_add));

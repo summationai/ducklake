@@ -1,0 +1,226 @@
+# name: test/sql/branch/branch_corruption.test
+# description: damaged branch metadata is reported as an error and leaves main and other branches usable
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_corruption_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(10)
+
+# every branch below gets one kind of damage
+statement ok
+CREATE BRANCH missing_main_file
+
+statement ok
+CREATE BRANCH missing_branch_file
+
+statement ok
+CREATE BRANCH two_branch_deletes
+
+statement ok
+CREATE BRANCH two_main_deletes
+
+statement ok
+CREATE BRANCH missing_table
+
+statement ok
+CREATE BRANCH lost_row
+
+statement ok
+SET BRANCH missing_main_file
+
+statement ok
+DELETE FROM t WHERE i = 1
+
+statement ok
+SET BRANCH missing_branch_file
+
+statement ok
+INSERT INTO t VALUES (100), (101)
+
+statement ok
+DELETE FROM t WHERE i = 100
+
+statement ok
+SET BRANCH two_branch_deletes
+
+statement ok
+INSERT INTO t VALUES (100), (101)
+
+statement ok
+DELETE FROM t WHERE i = 100
+
+statement ok
+SET BRANCH two_main_deletes
+
+statement ok
+DELETE FROM t WHERE i = 2
+
+statement ok
+SET BRANCH missing_table
+
+statement ok
+INSERT INTO t VALUES (100)
+
+statement ok
+SET BRANCH main
+
+# the metadata is edited in statements of its own, as it would be by hand
+statement ok
+SET VARIABLE missing_branch_file = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_branch_file')
+
+statement ok
+SET VARIABLE missing_main_file = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'missing_main_file')
+
+statement ok
+SET VARIABLE two_branch_deletes = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'two_branch_deletes')
+
+statement ok
+SET VARIABLE two_main_deletes = (SELECT branch_id FROM ducklake_branches('ducklake') WHERE branch_name = 'two_main_deletes')
+
+# a branch delete on a main data file that does not exist
+statement ok
+UPDATE ducklake_meta.ducklake_branching_delete_file SET target_data_file_id = 999999 WHERE branch_id = getvariable('missing_main_file')
+
+statement ok
+SET BRANCH missing_main_file
+
+statement error
+SELECT COUNT(*) FROM t
+----
+references data file 999999, which is no longer visible
+
+statement ok
+SET BRANCH main
+
+# a branch delete on a branch data file that does not exist
+statement ok
+UPDATE ducklake_meta.ducklake_branching_delete_file SET target_branch_file_id = 999999 WHERE branch_id = getvariable('missing_branch_file')
+
+statement ok
+SET BRANCH missing_branch_file
+
+statement error
+SELECT COUNT(*) FROM t
+----
+has a delete file for a missing branch data file
+
+statement ok
+SET BRANCH main
+
+# two active delete files for one branch data file, and for one main data file
+statement ok
+INSERT INTO ducklake_meta.ducklake_branching_delete_file SELECT branch_file_id + 1000 AS branch_file_id, * EXCLUDE (branch_file_id) FROM ducklake_meta.ducklake_branching_delete_file WHERE branch_id = getvariable('two_branch_deletes')
+
+statement ok
+INSERT INTO ducklake_meta.ducklake_branching_delete_file SELECT branch_file_id + 1000 AS branch_file_id, * EXCLUDE (branch_file_id) FROM ducklake_meta.ducklake_branching_delete_file WHERE branch_id = getvariable('two_main_deletes')
+
+statement ok
+SET BRANCH two_branch_deletes
+
+statement error
+SELECT COUNT(*) FROM t
+----
+has more than one active delete file
+
+statement ok
+SET BRANCH two_main_deletes
+
+statement error
+SELECT COUNT(*) FROM t
+----
+has more than one active delete file
+
+statement ok
+SET BRANCH main
+
+# the branch row itself removed while a connection is on the branch
+statement ok
+SET BRANCH lost_row
+
+statement ok
+DELETE FROM ducklake_meta.ducklake_branching_branch WHERE branch_name = 'lost_row'
+
+statement error
+SELECT COUNT(*) FROM t
+----
+no longer exists - this connection is back on main
+
+query I
+SELECT branch_name FROM ducklake_current_branch('ducklake')
+----
+main
+
+# a stale name row blocks creating a branch of that name
+statement ok
+INSERT INTO ducklake_meta.ducklake_branching_name VALUES ('stale', 999999)
+
+statement error
+CREATE BRANCH stale
+----
+another branch may have been created concurrently
+
+# the fork snapshot removed while a connection is on the branch
+statement ok
+INSERT INTO t VALUES (10)
+
+statement ok
+CREATE BRANCH lost_fork
+
+statement ok
+INSERT INTO t VALUES (11)
+
+statement ok
+SET VARIABLE lost_fork = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'lost_fork')
+
+statement ok
+SET BRANCH lost_fork
+
+statement ok
+DELETE FROM ducklake_meta.ducklake_snapshot WHERE snapshot_id = getvariable('lost_fork')
+
+statement error
+SELECT COUNT(*) FROM t
+----
+no longer exists - this connection is back on main
+
+# main is unaffected by all of it
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+12	66
+
+# a missing branch metadata table surfaces as an error when a branch is read
+statement ok
+DROP TABLE ducklake_meta.ducklake_branching_inlined_delete
+
+statement ok
+SET BRANCH missing_table
+
+statement error
+SELECT COUNT(*) FROM t
+----
+Failed to read DuckLake branch inlined deletes
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT COUNT(*) FROM t
+----
+12

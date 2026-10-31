@@ -1,0 +1,106 @@
+# name: test/sql/branch/branch_blocked.test
+# description: operations a branch does not support yet fail with a clear error
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_blocked_files')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement error
+CREATE TABLE t2(i INTEGER)
+----
+not supported on a branch yet
+
+statement error
+ALTER TABLE t ADD COLUMN j INTEGER
+----
+not supported on a branch yet
+
+statement error
+DROP TABLE t
+----
+not supported on a branch yet
+
+statement error
+CREATE VIEW v AS SELECT 1
+----
+not supported on a branch yet
+
+statement error
+CREATE SCHEMA s
+----
+not supported on a branch yet
+
+statement error
+SELECT * FROM t AT (VERSION => 1)
+----
+not supported on a branch yet
+
+statement error
+FROM ducklake_table_changes('ducklake', 'main', 't', 0, 2)
+----
+not supported on a branch yet
+
+statement error
+CALL ducklake_merge_adjacent_files('ducklake')
+----
+not supported on a branch yet
+
+statement error
+CALL ducklake_expire_snapshots('ducklake', older_than => NOW())
+----
+not supported on a branch yet
+
+statement error
+CALL ducklake_flush_inlined_data('ducklake')
+----
+not supported on a branch yet
+
+statement error
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+----
+not supported on a branch yet
+
+statement error
+CALL ducklake.set_option('target_file_size', '1MB')
+----
+not supported on a branch yet
+
+# the branch still works after the failed statements
+statement ok
+INSERT INTO t VALUES (2)
+
+query I
+SELECT SUM(i) FROM t
+----
+3
+
+statement ok
+SET BRANCH main
+
+query I
+SELECT SUM(i) FROM t
+----
+1
