@@ -25,6 +25,9 @@ CREATE TABLE small AS SELECT range AS i FROM range(10)
 statement ok
 CREATE TABLE empty_t (i INTEGER)
 
+statement ok
+CREATE TABLE growing AS SELECT range AS i FROM range(1000)
+
 # main: a table with no stats has no estimate, as before
 statement ok
 EXPLAIN SELECT * FROM empty_t
@@ -54,6 +57,34 @@ query I
 SELECT count(*) FROM big
 ----
 50000
+
+# branch-local inserts do not replace main's row count estimate
+statement ok
+INSERT INTO growing SELECT range + 1000 FROM range(9000)
+
+query II
+EXPLAIN SELECT * FROM growing
+----
+physical_plan	<REGEX>:.*~1,000 rows.*
+
+query I
+SELECT count(*) FROM growing
+----
+10000
+
+# a table created on the branch has no main estimate and still scans normally
+statement ok
+CREATE TABLE branch_only AS SELECT range AS i FROM range(1234)
+
+query II
+EXPLAIN SELECT * FROM branch_only
+----
+physical_plan	<!REGEX>:.*~(10|100,000) rows.*
+
+query I
+SELECT count(*) FROM branch_only
+----
+1234
 
 # a table main has no stats for gets no estimate on the branch either
 statement ok

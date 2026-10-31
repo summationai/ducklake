@@ -53,6 +53,16 @@ for test in test/sql/branch/*.test; do
 	echo "ran $name"
 done
 
+# require-env skips this file in the normal matrix; run the security mode explicitly
+syntax_off=test/sql/branch/branch_syntax_off.test
+if ! DUCKLAKE_BRANCH_SYNTAX=off LLVM_PROFILE_FILE="$OUT/raw/branch_syntax_off@syntax_off.profraw" \
+	build/release/test/unittest "$syntax_off" >"$OUT/raw/branch_syntax_off@syntax_off.log" 2>&1; then
+	echo "FAILED: $syntax_off (syntax_off)"
+	tail -30 "$OUT/raw/branch_syntax_off@syntax_off.log"
+	exit 1
+fi
+echo "ran branch_syntax_off (syntax_off)"
+
 # the tests run the branching code from the loadable extension
 python3 scripts/branching/coverage_report.py "$OUT" build/release/extension/ducklake/ducklake.duckdb_extension \
 	docs/branching/COVERAGE.md

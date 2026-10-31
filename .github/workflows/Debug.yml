@@ -74,3 +74,9 @@ jobs:
         DUCKDB_TPCH_ANSWERS_DIR: ${{ github.workspace }}/duckdb/extension/tpch/dbgen/answers
       run: |
         build/debug/test/unittest
+
+    - name: Test extension with branch syntax disabled
+      env:
+        DUCKLAKE_BRANCH_SYNTAX: off
+      run: |
+        build/debug/test/unittest test/sql/branch/branch_syntax_off.test
