@@ -142,6 +142,26 @@ FROM own
 ----
 1	2	new
 
+# a nested column the branch dropped from its own table keeps its children
+statement ok
+CREATE TABLE own_nested(i INTEGER, s STRUCT(a INTEGER, b VARCHAR))
+
+statement ok
+INSERT INTO own_nested VALUES (1, {'a': 2, 'b': 'x'})
+
+statement ok
+ALTER TABLE own_nested DROP COLUMN s
+
+# a dropped column whose fallback name is already taken
+statement ok
+CREATE TABLE own_names(a INTEGER, b INTEGER, b__dropped_2 INTEGER)
+
+statement ok
+ALTER TABLE own_names DROP COLUMN b
+
+statement ok
+ALTER TABLE own_names ADD COLUMN b VARCHAR
+
 # what DuckLake still refuses
 statement ok
 CREATE TABLE single(only_column INTEGER)
@@ -166,6 +186,18 @@ USE ducklake
 
 statement ok
 SET BRANCH x
+
+query I
+FROM own_nested
+----
+1
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE own_names)
+----
+a	INTEGER
+b__dropped_2	INTEGER
+b	VARCHAR
 
 query IITT
 SELECT a, c, b, s FROM t ORDER BY a

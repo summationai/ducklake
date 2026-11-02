@@ -298,7 +298,14 @@ set<string> EncodeColumnChanges(DuckLakeTransaction &transaction, DuckLakeLoaded
 					if (!previous) {
 						throw InternalException("A dropped column of a table missing at the fork");
 					}
-					column = previous->Cast<DuckLakeTableEntry>().GetColumnInfo(change.field_index);
+					auto &previous_table = previous->Cast<DuckLakeTableEntry>();
+					column = previous_table.GetColumnInfo(change.field_index);
+					// GetColumnInfo describes the root alone: a nested column keeps its children and their ids
+					auto field_id = previous_table.GetFieldId(change.field_index);
+					if (field_id && field_id->HasChildren()) {
+						column.children =
+						    DuckLakeTableEntry::ConvertColumn(column.name, field_id->Type(), *field_id).children;
+					}
 				} else {
 					continue;
 				}
@@ -827,7 +834,12 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 						return false;
 					};
 					if (taken(column.info.name)) {
-						column.info.name += "__dropped_" + to_string(column.column_id);
+						auto base = column.info.name + "__dropped_" + to_string(column.column_id);
+						auto name = base;
+						for (idx_t suffix = 2; taken(name); suffix++) {
+							name = base + "_" + to_string(suffix);
+						}
+						column.info.name = name;
 					}
 					dropped_names.push_back(column.info.name);
 					columns.push_back(std::move(column));
