@@ -193,3 +193,98 @@ SELECT rowid, v FROM ducklake.rid ORDER BY v
 ----
 1	10
 5	50
+
+# so does a column named snapshot_id, filename or file_row_number, which the merge reads by name to locate rows:
+# a snapshot_id column hid the rows both sides updated, and main got both copies
+statement ok
+CREATE TABLE ducklake.sid(snapshot_id INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO ducklake.sid VALUES (7, 10), (7, 50)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'sb')
+
+statement ok
+UPDATE ducklake.sid SET snapshot_id = 8 WHERE v = 10
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'sb')
+
+statement ok
+UPDATE ducklake.sid SET snapshot_id = 9 WHERE v = 10
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'sb')
+----
+Transaction conflict
+
+query II
+SELECT snapshot_id, v FROM ducklake.sid ORDER BY v
+----
+8	10
+7	50
+
+# a filename column put the user's value where the branch's file path goes: the same update on both sides failed
+# with an internal error
+statement ok
+CREATE TABLE ducklake.fn(filename VARCHAR, v INTEGER)
+
+statement ok
+INSERT INTO ducklake.fn VALUES ('a.csv', 10), ('b.csv', 50)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'fb')
+
+statement ok
+UPDATE ducklake.fn SET filename = 'same.csv' WHERE v = 10
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'fb')
+
+statement ok
+UPDATE ducklake.fn SET filename = 'same.csv' WHERE v = 10
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+statement error
+CALL ducklake_merge_branch('ducklake', 'fb')
+----
+Transaction conflict
+
+query II
+SELECT filename, v FROM ducklake.fn ORDER BY v
+----
+same.csv	10
+b.csv	50
+
+# such a table still merges when only the branch changed it
+statement ok
+CREATE TABLE ducklake.frn(file_row_number INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO ducklake.frn VALUES (1, 10)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'nb')
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'nb')
+
+statement ok
+UPDATE ducklake.frn SET v = 11
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+statement ok
+CALL ducklake_merge_branch('ducklake', 'nb')
+
+query II
+SELECT file_row_number, v FROM ducklake.frn
+----
+1	11
