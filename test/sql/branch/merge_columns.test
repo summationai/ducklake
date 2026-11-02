@@ -177,3 +177,30 @@ query I
 SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_column_change
 ----
 0
+
+# a table a branch created and dropped a nested column of merges with that column's ids taken on main
+statement ok
+CALL ducklake_create_branch('ducklake', 'nested_drop')
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'nested_drop')
+
+statement ok
+CREATE TABLE ducklake.nd(i INTEGER, s STRUCT(a INTEGER, b INTEGER[]))
+
+statement ok
+INSERT INTO ducklake.nd VALUES (1, {'a': 2, 'b': [3]})
+
+statement ok
+ALTER TABLE ducklake.nd DROP COLUMN s
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+statement ok
+CALL ducklake_merge_branch('ducklake', 'nested_drop')
+
+query I
+FROM ducklake.nd
+----
+1
