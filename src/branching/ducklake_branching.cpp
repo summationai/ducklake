@@ -183,8 +183,8 @@ bool DuckLakeBranching::IsInlinedTablePinned(DuckLakeTransaction &transaction,
 	auto &metadata_manager = transaction.GetMetadataManager();
 	auto col_names = metadata_manager.InlinedColNames();
 	auto result = metadata_manager.Query(StringUtil::Format(
-	    "SELECT 1 FROM {METADATA_CATALOG}.%s, (VALUES %s) forks(fork) WHERE %s <= fork AND (%s IS NULL OR %s > fork) "
-	    "LIMIT 1",
+	    "SELECT 1 FROM {METADATA_CATALOG}.%s inlined, (VALUES %s) forks(fork) WHERE inlined.%s <= forks.fork AND "
+	    "(inlined.%s IS NULL OR inlined.%s > forks.fork) LIMIT 1",
 	    inlined_table.table_name, fork_values, col_names.begin_snapshot, col_names.end_snapshot,
 	    col_names.end_snapshot));
 	if (result->HasError()) {

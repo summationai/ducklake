@@ -184,3 +184,32 @@ query I
 SELECT COUNT(*) FROM v
 ----
 0
+
+# a user column named fork does not clash with the active forks the pin check reads
+statement ok
+CREATE TABLE f(fork INTEGER, begin_snapshot INTEGER)
+
+statement ok
+INSERT INTO f VALUES (1, 1), (2, 2)
+
+statement ok
+CREATE BRANCH reads_f
+
+query I
+SELECT COUNT(*) FROM ducklake_flush_inlined_data('ducklake') WHERE table_name = 'f'
+----
+0
+
+statement ok
+DROP BRANCH reads_f
+
+query I
+SELECT COUNT(*) FROM ducklake_flush_inlined_data('ducklake') WHERE table_name = 'f'
+----
+1
+
+query II
+SELECT fork, begin_snapshot FROM f ORDER BY fork
+----
+1	1
+2	2
