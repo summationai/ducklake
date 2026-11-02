@@ -65,6 +65,12 @@ SELECT table_name, status, conflict FROM ducklake_merge_branch('ducklake', 'pric
 ----
 prices	ok	NULL
 
+# the Jacket update main made too inserts and deletes nothing: only Hat goes in and Scarf goes out
+query II
+SELECT rows_inserted, rows_deleted FROM ducklake_merge_branch('ducklake', 'pricing', dry_run => true)
+----
+1	1
+
 query IIIII
 FROM ducklake_merge_branch('ducklake', 'pricing', dry_run => true, table_name => 'prices')
 ----

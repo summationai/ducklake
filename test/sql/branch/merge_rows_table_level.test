@@ -306,3 +306,49 @@ query II
 SELECT file_row_number, v FROM ducklake.frn
 ----
 1	11
+
+# a table main only renamed merges under the table-level rules, and the row view agrees with the summary
+statement ok
+CREATE TABLE ducklake.rename_only(i INTEGER)
+
+statement ok
+INSERT INTO ducklake.rename_only VALUES (1), (2), (3)
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'b_rename_only')
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'b_rename_only')
+
+statement ok
+DELETE FROM ducklake.rename_only WHERE i = 1
+
+statement ok
+INSERT INTO ducklake.rename_only VALUES (4)
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+statement ok
+ALTER TABLE ducklake.rename_only RENAME TO rename_only_on_main
+
+query II
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'b_rename_only', dry_run => true)
+----
+rename_only	ok
+
+query III
+SELECT change_type, merge_status, i FROM ducklake_merge_branch('ducklake', 'b_rename_only', dry_run => true, table_name => 'rename_only') ORDER BY i
+----
+delete	ok	1
+insert	ok	4
+
+statement ok
+CALL ducklake_merge_branch('ducklake', 'b_rename_only')
+
+query I
+FROM ducklake.rename_only_on_main ORDER BY i
+----
+2
+3
+4

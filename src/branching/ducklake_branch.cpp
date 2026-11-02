@@ -1332,8 +1332,7 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
                                                                       const string &name) {
 	// a dry run loads the branch into its transaction, which the scans of one query share and may run in parallel
 	// (a UNION ALL of dry runs under an ORDER BY): dry runs take turns
-	static mutex preview_lock;
-	lock_guard<mutex> preview_guard(preview_lock);
+	lock_guard<mutex> preview_guard(transaction.branch_preview_lock);
 	if (IsOnBranch(transaction)) {
 		throw InvalidInputException("Cannot preview a merge while on a branch - run SET BRANCH main first");
 	}
@@ -1468,17 +1467,55 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 		// the row plans read the branch on new connections: they must see the head the counts below come from
 		EnsureBranchHeadCommitted(transaction, *branch);
 	}
+	// the counts above treat every branch row as new: the row plans keep main's copy of some, and drop main's of others
+	for (auto &table : row_merge) {
+		auto entry = entries.find(table.first);
+		if (entry == entries.end()) {
+			continue;
+		}
+		auto &plan = table.second;
+		// main deleted every row both sides touched, so the branch's deletes of them change nothing
+		auto repeated_deletes = plan.overlap.size() - plan.conflicts.size();
+		entry->second.rows_deleted -= MinValue<idx_t>(entry->second.rows_deleted, repeated_deletes);
+		for (auto &main_rows : plan.main_rows_to_drop) {
+			entry->second.rows_deleted += main_rows.second.size();
+		}
+		for (auto &change : local_changes.Changes()) {
+			if (change.GetTableIndex() != table.first) {
+				continue;
+			}
+			for (auto &file : change.GetTableChanges().new_data_files) {
+				auto dropped = plan.branch_rows_to_drop.find(file.file_name);
+				if (dropped == plan.branch_rows_to_drop.end()) {
+					continue;
+				}
+				idx_t deleted = file.delete_files.empty() ? 0 : file.delete_files.back().delete_count;
+				entry->second.rows_inserted -= dropped->second.size();
+				if (deleted + dropped->second.size() >= file.row_count) {
+					// the merge takes over no file whose rows all go
+					entry->second.files_added--;
+				}
+			}
+		}
+	}
 	// the rules compare the transaction's delete files and dropped files with main's, so they see one table at a time
-	auto all_local_changes = std::move(local_changes.changes);
+	decltype(local_changes.changes) all_local_changes;
+	{
+		lock_guard<mutex> guard(local_changes.lock);
+		all_local_changes = std::move(local_changes.changes);
+	}
 	auto all_dropped_files = std::move(state.dropped_files);
 	vector<DuckLakeMergePreviewEntry> result;
 	for (auto &entry_pair : entries) {
 		auto table_id = entry_pair.first;
 		auto &entry = entry_pair.second;
-		local_changes.changes.clear();
 		auto table_local_changes = all_local_changes.find(table_id);
-		if (table_local_changes != all_local_changes.end()) {
-			local_changes.changes.emplace(table_id, std::move(table_local_changes->second));
+		{
+			lock_guard<mutex> guard(local_changes.lock);
+			local_changes.changes.clear();
+			if (table_local_changes != all_local_changes.end()) {
+				local_changes.changes.emplace(table_id, std::move(table_local_changes->second));
+			}
 		}
 		state.dropped_files.clear();
 		for (auto &dropped : all_dropped_files) {
@@ -1508,11 +1545,15 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
 			entry.conflict = RowConflictMessage(name, row_merged->second);
 		}
 		if (table_local_changes != all_local_changes.end()) {
+			lock_guard<mutex> guard(local_changes.lock);
 			table_local_changes->second = std::move(local_changes.changes[table_id]);
 		}
 		result.push_back(std::move(entry));
 	}
-	local_changes.changes = std::move(all_local_changes);
+	{
+		lock_guard<mutex> guard(local_changes.lock);
+		local_changes.changes = std::move(all_local_changes);
+	}
 	state.dropped_files = std::move(all_dropped_files);
 	std::sort(result.begin(), result.end(), [](const DuckLakeMergePreviewEntry &a, const DuckLakeMergePreviewEntry &b) {
 		return std::tie(a.schema_name, a.table_name) < std::tie(b.schema_name, b.table_name);

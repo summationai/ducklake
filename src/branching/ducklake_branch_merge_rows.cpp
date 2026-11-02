@@ -91,9 +91,17 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	auto fork_snapshot = transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND);
 	auto main_changes = DuckLakeBranchManager::MainChangesSince(transaction, *fork_snapshot);
 	set<TableIndex> table_ids {main_table_id};
-	if (DuckLakeBranchManager::KeepsTableLevelRules(main_table_id, false, false, main_changes) ||
-	    !DuckLakeBranchManager::RenamedOnMain(transaction, false, table_ids, result.fork_snapshot_id).empty()) {
+	if (DuckLakeBranchManager::KeepsTableLevelRules(main_table_id, false, false, main_changes)) {
 		result.table_conflicts = true;
+		return result;
+	}
+	if (!DuckLakeBranchManager::RenamedOnMain(transaction, false, table_ids, result.fork_snapshot_id).empty()) {
+		// a renamed table merges under the table-level rules alone: it conflicts only where the summary says so
+		for (auto &entry : DuckLakeBranchManager::PreviewMerge(transaction, branch_name)) {
+			if (entry.table_id == main_table_id && !entry.conflict.empty()) {
+				result.table_conflicts = true;
+			}
+		}
 		return result;
 	}
 	if (DuckLakeBranchManager::KeepsTableLevelRules(main_table_id, true, true, main_changes)) {
