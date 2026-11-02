@@ -76,14 +76,18 @@ bool DuckLakeBranchManager::KeepsTableLevelRules(TableIndex table_id, bool branc
 	return branch_deleted_inlined && Contains(main_changes.tables_flushed_inlined, table_id);
 }
 
-//! Rows are matched by DuckDB's rowid, which a column of that name hides
-static bool HasRowIdColumn(CatalogEntry &entry) {
+//! Rows are matched by DuckDB's rowid and located by DuckLake's snapshot_id, filename and file_row_number, all read
+//! by name: a column of the table with one of those names takes the virtual column's place
+string DuckLakeBranchManager::HiddenVirtualColumn(CatalogEntry &entry) {
 	for (auto &column : entry.Cast<TableCatalogEntry>().GetColumns().Logical()) {
-		if (StringUtil::CIEquals(column.Name().GetIdentifierName(), "rowid")) {
-			return true;
+		auto name = column.Name().GetIdentifierName();
+		for (auto virtual_column : {"rowid", "snapshot_id", "filename", "file_row_number"}) {
+			if (StringUtil::CIEquals(name, virtual_column)) {
+				return name;
+			}
 		}
 	}
-	return false;
+	return string();
 }
 
 map<TableIndex, DuckLakeRowMergeTable>
@@ -140,8 +144,8 @@ DuckLakeBranchManager::FindRowMergeTables(DuckLakeTransaction &transaction, cons
 			// tables in nested schemas keep the table-level rules
 			continue;
 		}
-		if (HasRowIdColumn(*entry)) {
-			// so do tables with a column named rowid: their rows can't be matched
+		if (!HiddenVirtualColumn(*entry).empty()) {
+			// so do tables with a column that hides one the merge reads by name: their rows can't be located
 			continue;
 		}
 		DuckLakeRowMergeTable table;

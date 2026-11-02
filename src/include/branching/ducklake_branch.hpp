@@ -237,6 +237,9 @@ public:
 	                                                                 const DuckLakeLoadedBranch &loaded,
 	                                                                 DuckLakeSnapshot fork_snapshot,
 	                                                                 const SnapshotChangeInformation &main_changes);
+	//! The name of a column of the table that hides a virtual column the row merge reads by name (rowid, snapshot_id,
+	//! filename or file_row_number), or an empty string
+	static string HiddenVirtualColumn(CatalogEntry &entry);
 	//! The ids among the given tables (or views), at least one, that main renamed since the fork
 	static set<TableIndex> RenamedOnMain(DuckLakeTransaction &transaction, bool views, const set<TableIndex> &ids,
 	                                     idx_t fork_snapshot_id);
