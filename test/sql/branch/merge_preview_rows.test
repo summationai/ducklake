@@ -266,3 +266,59 @@ query TT
 SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'r', dry_run => true)
 ----
 rid	ok
+
+# so does a column named snapshot_id, filename or file_row_number, which the merge reads by name to locate rows;
+# such a table keeps the table-level rules, so the summary calls an overlap on it a conflict
+statement ok
+CREATE TABLE sid(snapshot_id INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO sid VALUES (7, 10)
+
+statement ok
+CREATE BRANCH s
+
+statement ok
+UPDATE sid SET snapshot_id = 8
+
+statement ok
+SET BRANCH s
+
+statement ok
+UPDATE sid SET snapshot_id = 9
+
+statement ok
+SET BRANCH main
+
+statement error
+FROM ducklake_merge_branch('ducklake', 's', dry_run => true, table_name => 'sid')
+----
+has a column named snapshot_id
+
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 's', dry_run => true)
+----
+sid	conflict
+
+statement ok
+CREATE TABLE fn(filename VARCHAR, v INTEGER)
+
+statement ok
+INSERT INTO fn VALUES ('a.csv', 10)
+
+statement ok
+CREATE BRANCH f
+
+statement ok
+SET BRANCH f
+
+statement ok
+UPDATE fn SET v = 11
+
+statement ok
+SET BRANCH main
+
+statement error
+FROM ducklake_merge_branch('ducklake', 'f', dry_run => true, table_name => 'fn')
+----
+has a column named filename

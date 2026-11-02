@@ -69,12 +69,14 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 			                            table_name, StringUtil::Lower(CatalogTypeToString(entry->type)));
 		}
 		auto &table = entry->Cast<DuckLakeTableEntry>();
+		auto hidden = DuckLakeBranchManager::HiddenVirtualColumn(table);
+		if (!hidden.empty()) {
+			throw InvalidInputException("Table \"%s\" has a column named %s, which hides the virtual column its rows "
+			                            "are read by - they can't be shown by row id; the merge applies table-level "
+			                            "rules to it",
+			                            table_name, hidden);
+		}
 		for (auto &column : table.GetColumns().Logical()) {
-			if (StringUtil::CIEquals(column.Name().GetIdentifierName(), "rowid")) {
-				throw InvalidInputException("Table \"%s\" has a column named rowid, which hides DuckDB's row id - its "
-				                            "rows can't be shown by row id; the merge applies table-level rules to it",
-				                            table_name);
-			}
 			result.column_names.push_back(column.Name().GetIdentifierName());
 			result.column_types.push_back(column.Type());
 		}
