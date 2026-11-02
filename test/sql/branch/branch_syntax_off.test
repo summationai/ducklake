@@ -46,10 +46,15 @@ DROP BRANCH IF EXISTS analysis
 ----
 Parser Error
 
-# a statement behind one doesn't run either: the whole query is a syntax error
-
+# a branch statement fails like any syntax error: nothing behind it runs, and what came before it runs as DuckDB
+# runs the statements before a typo
 statement error
 SET BRANCH main; ATTACH ':memory:' AS hidden_after
+----
+Parser Error
+
+statement error
+SELEC 1; ATTACH ':memory:' AS typo_after
 ----
 Parser Error
 
@@ -58,10 +63,15 @@ ATTACH ':memory:' AS hidden_before; SET BRANCH main
 ----
 Parser Error
 
-query I
-SELECT count(*) FROM duckdb_databases() WHERE database_name IN ('hidden_after', 'hidden_before')
+statement error
+ATTACH ':memory:' AS typo_before; SELEC 1
 ----
-0
+Parser Error
+
+query TT
+SELECT 'hidden_after' IN (SELECT database_name FROM duckdb_databases()), 'hidden_before' IN (SELECT database_name FROM duckdb_databases()) = 'typo_before' IN (SELECT database_name FROM duckdb_databases())
+----
+false	true
 
 # the functions still branch: create, switch, change, merge, drop
 

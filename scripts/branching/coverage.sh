@@ -43,8 +43,13 @@ for test in test/sql/branch/*.test; do
 		if [ "$config" != default ]; then
 			args=(--test-config "test/configs/$config.json")
 		fi
-		if ! LLVM_PROFILE_FILE="$OUT/raw/$name@$config.profraw" build/release/test/unittest ${args[@]+"${args[@]}"} \
-			"$test" >"$OUT/raw/$name@$config.log" 2>&1; then
+		# require-env skips the syntax-off test unless the variable is set before the process starts
+		syntax=on
+		if [ "$name" = branch_syntax_off ]; then
+			syntax=off
+		fi
+		if ! DUCKLAKE_BRANCH_SYNTAX=$syntax LLVM_PROFILE_FILE="$OUT/raw/$name@$config.profraw" \
+			build/release/test/unittest ${args[@]+"${args[@]}"} "$test" >"$OUT/raw/$name@$config.log" 2>&1; then
 			echo "FAILED: $test ($config)"
 			tail -30 "$OUT/raw/$name@$config.log"
 			exit 1
