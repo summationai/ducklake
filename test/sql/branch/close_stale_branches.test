@@ -597,3 +597,46 @@ statement error
 CALL ducklake_close_stale_branches('ducklake', older_than => NOW() + INTERVAL 1 DAY)
 ----
 ducklake_close_stale_branches requires DuckLake "ducklake" to be attached read-write
+
+# a lake that requires commit messages still archives and closes branches, and a name with a tab stays valid JSON
+require json
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_messages' AS cm (DATA_PATH '{DATA_PATH}/close_stale_branches_messages_files', METADATA_CATALOG 'cm_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE cm.t(i INTEGER)
+
+statement ok
+CALL cm.set_option('require_commit_message', true)
+
+statement ok
+CALL ducklake_create_branch('cm', 'tab' || chr(9) || 'name')
+
+statement ok
+CALL ducklake_set_branch('cm', 'tab' || chr(9) || 'name')
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO cm.t VALUES (1)
+
+statement ok
+CALL ducklake_set_commit_message('cm', 'tester', 'branch write')
+
+statement ok
+COMMIT
+
+statement ok
+CALL ducklake_set_branch('cm', 'main')
+
+query TI
+SELECT status, len(archived_tables) FROM ducklake_close_stale_branches('cm', older_than => NOW() + INTERVAL 1 DAY)
+----
+closed	1
+
+query II
+SELECT json_valid(commit_extra_info), commit_extra_info->>'branch' = 'tab' || chr(9) || 'name' FROM cm_meta.ducklake_branching_commit ORDER BY commit_seq DESC LIMIT 1
+----
+true	true

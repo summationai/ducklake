@@ -57,7 +57,33 @@ string SqlLiteral(const string &value) {
 }
 
 string JsonString(const string &value) {
-	return "\"" + StringUtil::Replace(StringUtil::Replace(value, "\\", "\\\\"), "\"", "\\\"") + "\"";
+	string result = "\"";
+	for (auto c : value) {
+		switch (c) {
+		case '"':
+			result += "\\\"";
+			break;
+		case '\\':
+			result += "\\\\";
+			break;
+		case '\n':
+			result += "\\n";
+			break;
+		case '\r':
+			result += "\\r";
+			break;
+		case '\t':
+			result += "\\t";
+			break;
+		default:
+			if (static_cast<uint8_t>(c) < 0x20) {
+				result += StringUtil::Format("\\u%04x", static_cast<int32_t>(c));
+			} else {
+				result += c;
+			}
+		}
+	}
+	return result + "\"";
 }
 
 //! <branch>__<table>__<date>, with the schema before the table when it is not main
@@ -167,6 +193,8 @@ void ArchiveAndClose(Connection &connection, DuckLakeCatalog &catalog, const str
 		}
 		auto &commit_info = transaction.GetCommitInfo();
 		commit_info.commit_message = Value("Close branch " + info.name);
+		// generated here, since the caller can't supply it to this internal connection
+		commit_info.is_commit_info_set = true;
 		commit_info.commit_extra_info = Value(StringUtil::Format(
 		    R"({"branch": %s, "fork_snapshot_id": %d, "branch_commits": %d, "archived_tables": [%s]})",
 		    JsonString(info.name), info.fork_snapshot_id, info.head_seq, archived));
