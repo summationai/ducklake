@@ -356,6 +356,54 @@ MERGE BRANCH ba ON CONFLICT KEEP BRANCH
 ----
 but another transaction has altered it
 
+# a branch that only inserted into a table main compacted merges: the conflicts view shows none
+statement ok
+CREATE TABLE compacted_ins(i INTEGER)
+
+statement ok
+CREATE BRANCH bci
+
+statement ok
+SET BRANCH bci
+
+statement ok
+INSERT INTO compacted_ins VALUES (3)
+
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO compacted_ins VALUES (1)
+
+statement ok
+INSERT INTO compacted_ins VALUES (2)
+
+# main's files are newer than the fork, so main may compact them
+query I
+SELECT COUNT(*) FROM ducklake_merge_adjacent_files('ducklake', 'compacted_ins')
+----
+1
+
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'bci', dry_run => true, table_name => 'compacted_ins', conflicts_only => true)
+----
+0
+
+query TT
+SELECT table_name, status FROM ducklake_merge_branch('ducklake', 'bci', dry_run => true)
+----
+compacted_ins	ok
+
+statement ok
+MERGE BRANCH bci
+
+query I
+FROM compacted_ins ORDER BY i
+----
+1
+2
+3
+
 # the merges left a restartable lake
 statement ok
 USE memory

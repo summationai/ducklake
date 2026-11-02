@@ -108,15 +108,20 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 	auto fork_snapshot = transaction.GetMetadataManager().GetSnapshot(fork_clause, SnapshotBound::UPPER_BOUND);
 	auto main_changes = DuckLakeBranchManager::MainChangesSince(transaction, *fork_snapshot);
 	set<TableIndex> table_ids {main_table_id};
+	// whether the merge as a whole fails on this table, as the summary dry run reports it
+	auto summary_conflicts = [&]() {
+		for (auto &entry : DuckLakeBranchManager::PreviewMerge(transaction, branch_name)) {
+			if (entry.table_id == main_table_id && !entry.conflict.empty()) {
+				return true;
+			}
+		}
+		return false;
+	};
 	if (DuckLakeBranchManager::KeepsTableLevelRules(main_table_id, false, false, main_changes)) {
 		result.table_conflicts = true;
 	} else if (!DuckLakeBranchManager::RenamedOnMain(transaction, false, table_ids, result.fork_snapshot_id).empty()) {
 		// a renamed table merges under the table-level rules alone: it conflicts only where the summary says so
-		for (auto &entry : DuckLakeBranchManager::PreviewMerge(transaction, branch_name)) {
-			if (entry.table_id == main_table_id && !entry.conflict.empty()) {
-				result.table_conflicts = true;
-			}
-		}
+		result.table_conflicts = summary_conflicts();
 		if (!result.table_conflicts) {
 			return result;
 		}
@@ -124,7 +129,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
 		result.deletes_conflict = true;
 	}
 	if (result.table_conflicts || result.deletes_conflict) {
-		if (conflicts_only) {
+		// deletes_conflict assumes the branch deleted rows: a branch that only inserted merges, with no conflicts
+		if (conflicts_only && (result.table_conflicts || summary_conflicts())) {
 			throw InvalidInputException("Table \"%s\" conflicts as a whole: main altered, dropped, renamed or "
 			                            "compacted it since the fork, so its rows are not merged one by one - "
 			                            "ducklake_merge_branch with dry_run => true shows the conflict",
