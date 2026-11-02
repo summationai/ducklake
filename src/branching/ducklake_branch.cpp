@@ -1671,10 +1671,10 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::LoadAndPreviewMerge(Duc
 			entry->second.rows_deleted += main_rows.second.size();
 		}
 		for (auto &change : local_changes.Changes()) {
-			if (change.GetTableIndex() != table.first) {
+			if (change.first != table.first) {
 				continue;
 			}
-			for (auto &file : change.GetTableChanges().new_data_files) {
+			for (auto &file : change.second.new_data_files) {
 				auto dropped = plan.branch_rows_to_drop.find(file.file_name);
 				if (dropped == plan.branch_rows_to_drop.end()) {
 					continue;
