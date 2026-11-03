@@ -226,9 +226,10 @@ vector<DuckLakeStaleBranch> DuckLakeBranchManager::CloseStaleBranches(ClientCont
 	});
 	auto &caller = DuckLakeTransaction::Get(context, catalog);
 	if (!dry_run && !caller.ChangesMade()) {
-		// a SQLite metadata catalog takes no write while another transaction reads it: the caller's read ends here
-		lock_guard<mutex> guard(caller.connection_lock);
-		caller.connection.reset();
+		// a SQLite metadata catalog takes no write while another transaction reads it: the caller's metadata
+		// transaction is committed here, keeping what earlier parts of the statement wrote to it directly (a branch
+		// created or dropped), and a new one begins when the caller next reads the catalog
+		caller.ReleaseMetadataTransaction();
 	}
 	auto close_date = Timestamp::GetDate(Timestamp::GetCurrentTimestamp());
 	case_insensitive_set_t reserved_names;
