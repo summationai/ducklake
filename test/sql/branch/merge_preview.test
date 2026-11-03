@@ -300,7 +300,7 @@ SELECT table_name, status, rows_deleted, main_changes_since_fork FROM ducklake_m
 ----
 b	ok	10	[deleted_from]
 
-# the scans of one query share its transaction, and run in parallel here: the dry runs take turns
+# the scans of one query run in parallel here: each dry run loads its branch into a transaction of its own
 query TTTII
 SELECT 'x', table_name, status, rows_inserted, rows_deleted FROM ducklake_merge_branch('ducklake', 'x', dry_run => true) UNION ALL SELECT 'y', table_name, status, rows_inserted, rows_deleted FROM ducklake_merge_branch('ducklake', 'y', dry_run => true) ORDER BY ALL
 ----
@@ -310,6 +310,13 @@ x	c	ok	1	0
 x	f	conflict	1	0
 x	u	ok	0	10
 y	b	ok	0	10
+
+# a dry run beside scans of the catalog in one query: the scans read main as it is, never the branch being previewed
+query TTIII
+SELECT table_name, status, rows_deleted, (SELECT COUNT(*) FROM a), (SELECT COUNT(*) FROM b) FROM ducklake_merge_branch('ducklake', 'x', dry_run => true) WHERE table_name IN ('a', 'b') ORDER BY table_name
+----
+a	ok	10	90	190
+b	ok	10	90	190
 
 # the merges agree with the previews
 query III

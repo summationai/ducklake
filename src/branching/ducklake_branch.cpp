@@ -1330,15 +1330,26 @@ void DuckLakeBranchManager::DiscardLoadedBranch(DuckLakeTransaction &transaction
 
 vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTransaction &transaction,
                                                                       const string &name) {
-	// a dry run loads the branch into its transaction, which the scans of one query share and may run in parallel
-	// (a UNION ALL of dry runs under an ORDER BY): dry runs take turns
-	lock_guard<mutex> preview_guard(transaction.branch_preview_lock);
 	if (IsOnBranch(transaction)) {
 		throw InvalidInputException("Cannot preview a merge while on a branch - run SET BRANCH main first");
 	}
 	if (IsMergingBranch(transaction) || transaction.ChangesMade()) {
 		throw InvalidInputException("ducklake_merge_branch(dry_run => true) needs a transaction without other changes");
 	}
+	// the branch is loaded into a transaction of its own, on a connection of its own: the other scans of the query,
+	// which share the caller's transaction and may run alongside, read main as it is
+	auto context_ref = transaction.context.lock();
+	Connection connection(*context_ref->db);
+	auto &preview_context = *connection.context;
+	vector<DuckLakeMergePreviewEntry> entries;
+	preview_context.RunFunctionInTransaction([&]() {
+		entries = LoadAndPreviewMerge(DuckLakeTransaction::Get(preview_context, transaction.GetCatalog()), name);
+	});
+	return entries;
+}
+
+vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::LoadAndPreviewMerge(DuckLakeTransaction &transaction,
+                                                                             const string &name) {
 	auto branch = GetActiveBranch(transaction, name);
 	if (!branch) {
 		throw InvalidInputException("Branch \"%s\" does not exist", name);
