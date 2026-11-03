@@ -91,6 +91,12 @@ analysis
 statement ok
 UPDATE prices SET price = 90 WHERE item = 'Boots'
 
+# on a branch, errors name the function that leads back to main, since SET BRANCH doesn't parse here
+statement error
+CALL ducklake_merge_branch('ducklake', 'analysis')
+----
+CALL ducklake_set_branch('ducklake', 'main') first
+
 statement ok
 CALL ducklake_set_branch('ducklake', 'main')
 

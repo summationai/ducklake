@@ -621,7 +621,8 @@ static void CloseStaleExecute(ClientContext &context, TableFunctionInput &data_p
 		}
 		DuckLakeBranchState::Selection selection;
 		if (GetBranchState(context).TryGetSelection(data.catalog.GetOid(), selection)) {
-			throw InvalidInputException("Cannot close branches while on a branch - run SET BRANCH main first");
+			throw InvalidInputException("Cannot close branches while on a branch - %s",
+			                            DuckLakeBranchManager::BackToMainHint(data.catalog));
 		}
 		state.branches = DuckLakeBranchManager::CloseStaleBranches(context, data.catalog, data.older_than,
 		                                                           data.archive_schema, data.dry_run);

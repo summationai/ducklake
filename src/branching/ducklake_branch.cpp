@@ -1224,11 +1224,17 @@ void DuckLakeBranchManager::DropFullyDeletedBranchFiles(DuckLakeTransaction &tra
 	}
 }
 
+string DuckLakeBranchManager::BackToMainHint(Catalog &catalog) {
+	// both spellings: with DUCKLAKE_BRANCH_SYNTAX=off, SET BRANCH is a parser error
+	return StringUtil::Format("run SET BRANCH main or CALL ducklake_set_branch(%s, 'main') first",
+	                          SQLString::ToString(catalog.GetName().GetIdentifierName()));
+}
+
 DuckLakeBranchInfo DuckLakeBranchManager::PrepareMerge(DuckLakeTransaction &transaction, const string &name,
                                                        optional_ptr<const DuckLakeSnapshotCommit> commit_info,
                                                        DuckLakeConflictResolution on_conflict) {
 	if (IsOnBranch(transaction)) {
-		throw InvalidInputException("Cannot merge while on a branch - run SET BRANCH main first");
+		throw InvalidInputException("Cannot merge while on a branch - %s", BackToMainHint(transaction.GetCatalog()));
 	}
 	if (IsMergingBranch(transaction)) {
 		throw InvalidInputException("Only one branch can be merged per transaction");
@@ -1436,7 +1442,8 @@ vector<DuckLakeMergePreviewEntry> DuckLakeBranchManager::PreviewMerge(DuckLakeTr
                                                                       const string &name,
                                                                       DuckLakeConflictResolution on_conflict) {
 	if (IsOnBranch(transaction)) {
-		throw InvalidInputException("Cannot preview a merge while on a branch - run SET BRANCH main first");
+		throw InvalidInputException("Cannot preview a merge while on a branch - %s",
+		                            BackToMainHint(transaction.GetCatalog()));
 	}
 	if (IsMergingBranch(transaction) || transaction.ChangesMade()) {
 		throw InvalidInputException("ducklake_merge_branch(dry_run => true) needs a transaction without other changes");
