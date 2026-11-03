@@ -640,3 +640,14 @@ query II
 SELECT json_valid(commit_extra_info), commit_extra_info->>'branch' = 'tab' || chr(9) || 'name' FROM cm_meta.ducklake_branching_commit ORDER BY commit_seq DESC LIMIT 1
 ----
 true	true
+
+# a branch created earlier in the same statement survives the close, which ends the caller's metadata transaction
+query I
+WITH created AS MATERIALIZED (FROM ducklake_create_branch('cm', 'kept')) SELECT COUNT(*) FROM created, ducklake_close_stale_branches('cm', older_than => NOW() - INTERVAL 1000 DAY)
+----
+0
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('cm') WHERE branch_name = 'kept'
+----
+1
