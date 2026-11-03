@@ -67,7 +67,8 @@ DuckLakeMergeRowsBindData DuckLakeMergeRowsScan::Bind(ClientContext &context, Du
                                                       bool conflicts_only) {
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	if (DuckLakeBranchManager::IsOnBranch(transaction)) {
-		throw InvalidInputException("Cannot preview a merge while on a branch - run SET BRANCH main first");
+		throw InvalidInputException("Cannot preview a merge while on a branch - %s",
+		                            DuckLakeBranchManager::BackToMainHint(catalog));
 	}
 	if (!DuckLakeBranchManager::GetActiveBranch(transaction, branch_name)) {
 		throw InvalidInputException("Branch \"%s\" does not exist", branch_name);

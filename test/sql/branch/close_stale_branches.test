@@ -438,7 +438,7 @@ SET BRANCH fresh
 statement error
 CALL ducklake_close_stale_branches('ducklake', older_than => NOW())
 ----
-Cannot close branches while on a branch - run SET BRANCH main first
+Cannot close branches while on a branch - run SET BRANCH main or CALL ducklake_set_branch('ducklake', 'main') first
 
 statement ok
 SET BRANCH main

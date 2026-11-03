@@ -23,6 +23,7 @@
 #include <thread>
 
 namespace duckdb {
+class Catalog;
 class CatalogEntry;
 class ClientContext;
 class DuckLakeCatalog;
@@ -285,6 +286,8 @@ public:
 	//! Runs with every conflict check of a merge commit
 	static void CheckMerge(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
 	                       const SnapshotChangeInformation &other_changes);
+	//! How to get back to main, for errors that need it: SET BRANCH main, or the function for lakes without the syntax
+	static string BackToMainHint(Catalog &catalog);
 	//! Reports what MERGE BRANCH would do, table by table, without changing anything: the branch is loaded into a
 	//! transaction of its own, so that the other scans of the query, which share this transaction, never see it
 	static vector<DuckLakeMergePreviewEntry>
