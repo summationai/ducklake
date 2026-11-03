@@ -190,8 +190,11 @@ public:
 	//! Runs with every conflict check of a merge commit
 	static void CheckMerge(DuckLakeTransaction &transaction, const DuckLakeBranchMerge &merge,
 	                       const SnapshotChangeInformation &other_changes);
-	//! Reports what MERGE BRANCH would do, table by table, without changing anything
+	//! Reports what MERGE BRANCH would do, table by table, without changing anything: the branch is loaded into a
+	//! transaction of its own, so that the other scans of the query, which share this transaction, never see it
 	static vector<DuckLakeMergePreviewEntry> PreviewMerge(DuckLakeTransaction &transaction, const string &name);
+	//! Loads the branch into the transaction, which must have no changes, reports the merge and discards the branch
+	static vector<DuckLakeMergePreviewEntry> LoadAndPreviewMerge(DuckLakeTransaction &transaction, const string &name);
 	//! Removes a loaded branch from the transaction again; only valid when the transaction had no changes before
 	static void DiscardLoadedBranch(DuckLakeTransaction &transaction);
 	//! The SQL that records the merge; part of the merge commit's batch

@@ -415,8 +415,6 @@ private:
 	unique_ptr<DuckLakeTransactionState> state;
 	//! Branch state of the transaction (src/branching)
 	shared_ptr<DuckLakeBranchTransactionState> branch_state;
-	//! Dry runs of merges load a branch into this transaction: the scans of one query take turns
-	mutex branch_preview_lock;
 	//! Snapshot cache for the AT (...) conditions that are referenced in the transaction
 	value_map_t<DuckLakeSnapshot> snapshot_cache;
 	//! New set of transaction-local name maps
