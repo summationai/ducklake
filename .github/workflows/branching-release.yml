@@ -213,7 +213,6 @@ jobs:
       DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
       # the official CLI of that release (duckdb-cli-linux-arm64.tar.gz of duckdb/duckdb v2.0.0)
       DUCKDB_CLI_SHA256: 859e1875d2a9515fbb4bf8871061437a14af82320da68c753f094c4b776348fe
-      MIRROR_PORT: '18765'
     steps:
       # smoke.sh, the committed public keys, and duckdb/scripts/compute-extension-hash.sh for the refusal copies
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -230,26 +229,21 @@ jobs:
             "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VERSION/duckdb-cli-linux-arm64.tar.gz"
           echo "$DUCKDB_CLI_SHA256  duckdb-cli.tar.gz" | sha256sum -c
           mkdir cli && tar -xzf duckdb-cli.tar.gz -C cli
-      # TODO(DXR-16): install from the build's public HTTPS prefix once the bucket allows public reads (the one-time
-      # step in summationai/code infra/gizmosql/extension-release). Until then the signed file the build uploaded is
-      # served from 127.0.0.1 in the same layout.
-      - name: Serve the build from a local mirror
-        run: |
-          mkdir -p "mirror/$DUCKDB_VERSION/linux_arm64"
-          cp signed/ducklake.duckdb_extension.gz "mirror/$DUCKDB_VERSION/linux_arm64/"
-          nohup python3 -I -m http.server "$MIRROR_PORT" --bind 127.0.0.1 --directory mirror > mirror.log 2>&1 &
-          for _ in $(seq 50); do curl -sf -o /dev/null "http://127.0.0.1:$MIRROR_PORT/" && break; sleep 0.1; done
-          echo "serving $(find mirror -type f) on 127.0.0.1:$MIRROR_PORT"
+      # DXR-16: installs from the build's public HTTPS prefix, as a cluster does; the signed artifact is only used to
+      # make the refused copies
       - name: Smoke test
         env:
           DUCKDB: ${{ github.workspace }}/cli/duckdb
+          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
         run: |
           pub=.github/branching/signing-public-key$([ "$FLAVOUR" = TEST ] && echo .test || true).pem
-          scripts/branching/release/smoke.sh "http://127.0.0.1:$MIRROR_PORT" "$pub" signed/ducklake.duckdb_extension.gz
+          repository="https://$BUCKET.s3.$AWS_REGION.amazonaws.com/${PREFIX}build/$GITHUB_SHA"
+          scripts/branching/release/smoke.sh "$repository" "$pub" signed/ducklake.duckdb_extension.gz
           {
             echo "### Smoke test: passed"
             echo "DuckDB $DUCKDB_VERSION CLI, \`allow_unsigned_extensions=false\`; installed and loaded through"
-            echo "\`CREATE EXTENSION REPOSITORY\` from a local mirror of the build; branches created, written, merged and"
+            echo "\`CREATE EXTENSION REPOSITORY\` from the build's public prefix; branches created, written, merged and"
             echo "dropped; a copy signed with another key and a tampered copy were refused."
           } >> "$GITHUB_STEP_SUMMARY"
 
