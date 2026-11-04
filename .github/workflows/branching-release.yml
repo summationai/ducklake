@@ -258,7 +258,8 @@ jobs:
     name: Publish to canary/
     needs: [duckdb-version, sign-and-upload, smoke]
     runs-on: ubuntu-24.04
-    # DXR-12: waits for an approval by one of the canary environment's required reviewers
+    # DXR-12: waits for an approval by one of the canary environment's required reviewers. The approved run is
+    # published even if newer commits have landed: approving an older build is how a reviewer rolls canary/ back.
     environment: canary
     # one publication at a time; a newer pending run replaces an older pending one
     concurrency:
@@ -277,32 +278,15 @@ jobs:
         with:
           sparse-checkout: scripts/branching/release
           persist-credentials: false
-      # DXR-12 step 4: an older run approved after a newer commit landed skips instead of moving canary/ backwards
-      - id: head
-        name: Check the build is still the branch's head
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "approved: $GITHUB_SHA for canary/ (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT) at $(date -u +%FT%TZ)"
-          status=0
-          scripts/branching/release/still_head.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA" || status=$?
-          case $status in
-          0) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
-          3) echo "publish=false" >> "$GITHUB_OUTPUT"
-             echo "### canary/: skipped, \`$GITHUB_SHA\` is no longer the head of \`$GITHUB_REF_NAME\`" >> "$GITHUB_STEP_SUMMARY" ;;
-          *) exit "$status" ;;
-          esac
-      - if: steps.head.outputs.publish == 'true'
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars[format('{0}_CANARY_WRITER_ROLE_ARN', env.FLAVOUR)] }}
           role-session-name: ducklake-canary-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 900
           aws-region: ${{ env.AWS_REGION }}
-      # DXR-12 step 5: S3 conditional copy (If-None-Match on a first publish, If-Match on the current ETag after), then
+      # DXR-12: S3 conditional copy (If-None-Match on a first publish, If-Match on the current ETag after), then
       # a SHA-256 check of the copy
       - id: promote
-        if: steps.head.outputs.publish == 'true'
         name: Copy the build to canary/
         env:
           BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
@@ -315,8 +299,7 @@ jobs:
           echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
       # DXR-18: fails if any field is missing or malformed. The approvals API has no approval time; the gated job
       # starts right after the approval, so its start time is recorded as when.
-      - if: steps.head.outputs.publish == 'true'
-        name: Record the publication
+      - name: Record the publication
         env:
           GH_TOKEN: ${{ github.token }}
           BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests promote.sh and still_head.sh (DXR-12) without AWS or GitHub: a stub `aws` keeps a versioned bucket in a
-# directory and honours If-None-Match / If-Match on copy-object the way S3 does; a stub `gh` returns a branch head.
+# Tests promote.sh (DXR-12) without AWS: a stub `aws` keeps a versioned bucket in a directory and honours
+# If-None-Match / If-Match on copy-object the way S3 does.
 #
 #   scripts/branching/release/test_promote.sh
 set -uo pipefail
@@ -63,9 +63,7 @@ EOF
 # the stubs expand their variables when they run
 # shellcheck disable=SC2016
 printf '#!/usr/bin/env bash\nexec python3 -I "%s" "$@"\n' "$WORK/s3.py" > "$WORK/bin/aws"
-# shellcheck disable=SC2016
-printf '#!/usr/bin/env bash\necho "$STUB_HEAD"\n' > "$WORK/bin/gh"
-chmod +x "$WORK/bin/aws" "$WORK/bin/gh"
+chmod +x "$WORK/bin/aws"
 export PATH="$WORK/bin:$PATH" STUB_BUCKET_DIR="$WORK/bucket"
 
 seed() { # <build key> <sha256>: an uploaded build
@@ -142,27 +140,6 @@ elif grep -q 'AccessDenied' "$WORK/err" && ! grep -q '::warning' "$WORK/err"; th
 	pass "an access error fails closed"
 else
 	flunk "denied: $(cat "$WORK/err")"
-fi
-
-# 8-10. still_head.sh: publish only the branch's newest commit
-S1=$(printf 1%.0s {1..40})
-S2=$(printf 2%.0s {1..40})
-if STUB_HEAD=$S1 bash "$HERE/still_head.sh" o/r develop "$S1" > /dev/null; then
-	pass "still_head: the head commit may publish"
-else
-	flunk "still_head refused the head"
-fi
-STUB_HEAD=$S2 bash "$HERE/still_head.sh" o/r develop "$S1" > "$WORK/out" 2>&1
-status=$?
-if [ $status = 3 ] && grep -q "superseded by $S2" "$WORK/out"; then
-	pass "still_head: an older commit skips as superseded"
-else
-	flunk "still_head on an older commit: exit $status, $(cat "$WORK/out")"
-fi
-if STUB_HEAD="Not Found" bash "$HERE/still_head.sh" o/r develop "$S1" > /dev/null 2>&1; then
-	flunk "still_head passed without a head"
-else
-	pass "still_head: an unreadable head fails"
 fi
 
 echo
