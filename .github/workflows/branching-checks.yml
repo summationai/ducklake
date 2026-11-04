@@ -112,6 +112,26 @@ jobs:
         createdb ducklakedb
         build/release/test/unittest --test-config test/configs/postgres.json --test-dir ./ "test/sql/*"
 
+  # The release pipeline's scripts (scripts/branching/release/), against stubs: no cloud access
+  release-scripts:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: Release script tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        submodules: 'true'
+        persist-credentials: false
+
+    - name: Shellcheck
+      run: |
+        shellcheck scripts/branching/release/*.sh
+
+    - name: Test sign.sh (DXR-9)
+      run: |
+        scripts/branching/release/test_sign.sh
+
   coverage:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Code coverage
