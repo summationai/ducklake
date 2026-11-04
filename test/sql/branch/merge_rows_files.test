@@ -1,0 +1,181 @@
+# name: test/sql/branch/merge_rows_files.test
+# description: the row-by-row merge with files either side emptied, branch rows spread over files, and inlined copies on main
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_files_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE both_emptied(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO both_emptied VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE main_emptied(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO main_emptied VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE branch_emptied(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO branch_emptied VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE two_files(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO two_files VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE own_delete(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO own_delete VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE TABLE inlined_rewrite(item VARCHAR, price INTEGER)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'inlined_rewrite')
+
+statement ok
+INSERT INTO inlined_rewrite VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+# the branch empties a main file
+
+statement ok
+DELETE FROM both_emptied
+
+statement ok
+DELETE FROM branch_emptied
+
+statement ok
+DELETE FROM main_emptied WHERE item = 'a'
+
+# two branch files hold rows main changed the same way
+
+statement ok
+UPDATE two_files SET price = 20 WHERE item = 'b'
+
+statement ok
+UPDATE two_files SET price = 30 WHERE item = 'c'
+
+# a branch file with a delete file of its own
+
+statement ok
+UPDATE own_delete SET price = 20 WHERE item IN ('b', 'c')
+
+statement ok
+DELETE FROM own_delete WHERE item = 'c'
+
+statement ok
+UPDATE inlined_rewrite SET price = 20 WHERE item = 'b'
+
+statement ok
+SET BRANCH main
+
+statement ok
+DELETE FROM both_emptied
+
+statement ok
+DELETE FROM main_emptied
+
+statement ok
+DELETE FROM branch_emptied WHERE item = 'e'
+
+statement ok
+UPDATE two_files SET price = 20 WHERE item = 'b'
+
+statement ok
+UPDATE two_files SET price = 30 WHERE item = 'c'
+
+statement ok
+UPDATE own_delete SET price = 20 WHERE item = 'b'
+
+# main only rewrites b with its old value; main's copy is inlined
+
+statement ok
+UPDATE inlined_rewrite SET price = price WHERE item = 'b'
+
+statement ok
+MERGE BRANCH b
+
+query I
+SELECT (SELECT COUNT(*) FROM both_emptied) + (SELECT COUNT(*) FROM main_emptied) + (SELECT COUNT(*) FROM branch_emptied)
+----
+0
+
+query TI
+FROM two_files ORDER BY item
+----
+a	1
+b	20
+c	30
+d	4
+e	5
+
+query TI
+FROM own_delete ORDER BY item
+----
+a	1
+b	20
+d	4
+e	5
+
+query TI
+FROM inlined_rewrite ORDER BY item
+----
+a	1
+b	20
+c	3
+d	4
+e	5
+
+query III
+SELECT (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM two_files), (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM own_delete), (SELECT COUNT(*) = COUNT(DISTINCT rowid) FROM inlined_rewrite)
+----
+true	true	true
+
+# the merge left a restartable lake
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_rows_files_files', METADATA_CATALOG 'ducklake_meta')
+
+query TI
+FROM ducklake.own_delete ORDER BY item
+----
+a	1
+b	20
+d	4
+e	5
+
+query I
+SELECT COUNT(*) FROM ducklake.branch_emptied
+----
+0

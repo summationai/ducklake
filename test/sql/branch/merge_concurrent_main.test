@@ -1,0 +1,294 @@
+# name: test/sql/branch/merge_concurrent_main.test
+# description: what merges and what conflicts when main changed after the fork
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_concurrent_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE a(i INTEGER)
+
+statement ok
+CREATE TABLE b(i INTEGER)
+
+statement ok
+CREATE TABLE c(i INTEGER)
+
+statement ok
+CREATE TABLE d(i INTEGER)
+
+statement ok
+CREATE TABLE e(i INTEGER)
+
+statement ok
+CREATE TABLE f(i INTEGER)
+
+statement ok
+CREATE TABLE g(i INTEGER)
+
+statement ok
+CREATE TABLE h(i INTEGER)
+
+statement ok
+CREATE TABLE u(i INTEGER)
+
+statement ok
+CREATE TABLE z(i INTEGER)
+
+statement ok
+INSERT INTO a SELECT range FROM range(100)
+
+statement ok
+INSERT INTO b SELECT range FROM range(100)
+
+statement ok
+INSERT INTO c SELECT range FROM range(100)
+
+statement ok
+INSERT INTO d SELECT range FROM range(100)
+
+statement ok
+INSERT INTO e SELECT range FROM range(100)
+
+statement ok
+INSERT INTO f SELECT range FROM range(100)
+
+statement ok
+INSERT INTO g SELECT range FROM range(100)
+
+statement ok
+INSERT INTO h SELECT range FROM range(100)
+
+statement ok
+INSERT INTO u SELECT range FROM range(100)
+
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10, schema => 'main', table_name => 'u')
+
+# g and h are mostly deleted before the fork, so main can rewrite them after it
+statement ok
+DELETE FROM g WHERE i < 96
+
+statement ok
+DELETE FROM h WHERE i < 96
+
+# every branch changes one table
+statement ok
+CREATE BRANCH ok_other
+
+statement ok
+CREATE BRANCH ok_insert
+
+statement ok
+CREATE BRANCH ok_rewrite
+
+statement ok
+CREATE BRANCH c_delete
+
+statement ok
+CREATE BRANCH c_insert
+
+statement ok
+CREATE BRANCH c_file
+
+statement ok
+CREATE BRANCH c_inlined
+
+statement ok
+CREATE BRANCH c_alter
+
+statement ok
+CREATE BRANCH c_drop
+
+statement ok
+CREATE BRANCH c_rewrite
+
+statement ok
+SET BRANCH ok_other
+
+statement ok
+INSERT INTO a VALUES (1000)
+
+statement ok
+SET BRANCH ok_insert
+
+statement ok
+INSERT INTO a VALUES (2000)
+
+statement ok
+SET BRANCH ok_rewrite
+
+statement ok
+INSERT INTO g VALUES (1000)
+
+statement ok
+SET BRANCH c_delete
+
+statement ok
+INSERT INTO b VALUES (1000)
+
+statement ok
+SET BRANCH c_insert
+
+statement ok
+DELETE FROM c WHERE i < 10
+
+statement ok
+SET BRANCH c_file
+
+statement ok
+DELETE FROM d WHERE i < 10
+
+statement ok
+SET BRANCH c_inlined
+
+statement ok
+DELETE FROM u WHERE i < 10
+
+statement ok
+SET BRANCH c_alter
+
+statement ok
+INSERT INTO e VALUES (1000)
+
+statement ok
+SET BRANCH c_drop
+
+statement ok
+INSERT INTO f VALUES (1000)
+
+statement ok
+SET BRANCH c_rewrite
+
+statement ok
+DELETE FROM h WHERE i >= 96 AND i < 98
+
+statement ok
+SET BRANCH main
+
+# main moves on
+statement ok
+INSERT INTO z VALUES (1)
+
+statement ok
+INSERT INTO a VALUES (3000)
+
+statement ok
+DELETE FROM b WHERE i < 10
+
+statement ok
+INSERT INTO c VALUES (1000)
+
+statement ok
+DELETE FROM d WHERE i >= 90
+
+statement ok
+DELETE FROM u WHERE i = 50
+
+statement ok
+ALTER TABLE e ADD COLUMN j INTEGER
+
+statement ok
+DROP TABLE f
+
+statement ok
+CALL ducklake_rewrite_data_files('ducklake')
+
+# a different table, or inserts on both sides, merge
+statement ok
+MERGE BRANCH ok_other
+
+statement ok
+MERGE BRANCH ok_insert
+
+query II
+SELECT COUNT(*), SUM(i) FILTER (i >= 1000) FROM a
+----
+103	6000
+
+# a rewrite of a table the branch only inserted into merges
+statement ok
+MERGE BRANCH ok_rewrite
+
+query II
+SELECT COUNT(*), MAX(i) FROM g
+----
+5	1000
+
+# tables both sides changed rows of merge row by row (merge_rows.test has the rules)
+# main deleted from the table the branch inserted into
+statement ok
+MERGE BRANCH c_delete
+
+# main inserted into the table the branch deleted from
+statement ok
+MERGE BRANCH c_insert
+
+# both deleted other rows of the same file
+statement ok
+MERGE BRANCH c_file
+
+# main deleted another row inline from the table the branch deleted from
+statement ok
+MERGE BRANCH c_inlined
+
+query IIII
+SELECT (SELECT COUNT(*) FROM b), (SELECT COUNT(*) FROM c), (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM u)
+----
+91	91	80	89
+
+# main altered or dropped the table
+statement error
+MERGE BRANCH c_alter
+----
+conflict
+
+statement error
+MERGE BRANCH c_drop
+----
+conflict
+
+# main rewrote a table the branch deleted from
+statement error
+MERGE BRANCH c_rewrite
+----
+conflict
+
+# the failed merges left main and the branches as they were
+query I
+SELECT COUNT(*) FROM h
+----
+4
+
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+3
+
+statement ok
+SET BRANCH c_rewrite
+
+query I
+SELECT COUNT(*) FROM h
+----
+2
+
+statement ok
+SET BRANCH main
+
+# nothing of the failed merges was scheduled: only files of the merged branches main did not take over
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904 AND path LIKE '%/h/%'
+----
+0
