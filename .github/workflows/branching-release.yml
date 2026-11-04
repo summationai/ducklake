@@ -2,9 +2,14 @@
 # Builds the DuckLake branching extension for the DuckDB the GizmoSQL clusters run, then signs, uploads, smoke-tests
 # and publishes it (spec: summationai/agent-cloud docs/specs/ducklake-extension-release.md, DXR-8 to DXR-18).
 #
-# Only the build is real for now. The other jobs check the build's stamp, log what they will do and write the step
-# summary; their signing, upload and copy steps, and the cloud identities behind them, come in a later pull request.
-# Only the jobs that will sign or publish get id-token: write. The build runs DuckDB's tooling and gets no cloud identity.
+# The spec was written for GCS; the repository is S3 (summationai/code infra/gizmosql/extension-release). Where the
+# spec says ifGenerationMatch this uses S3 conditional writes (If-None-Match / If-Match on the ETag), and DXR-18
+# records S3 version IDs instead of GCS generations.
+#
+# Each job that touches AWS assumes its own role through GitHub's OIDC token; the roles, the KMS key and the bucket
+# come from repository variables (terraform output github_repository_variables), never from this file. A push to
+# extension-build/release-test uses the TEST_* roles, the test key that no reader trusts, and the test/ prefix.
+# Only the jobs that sign or publish get id-token: write. The build runs DuckDB's tooling and gets no cloud identity.
 #
 name: Branching Release
 on:
@@ -15,6 +20,11 @@ on:
       - extension-build/release-test
 
 permissions: {}
+
+env:
+  # TODO(DXR-8): REAL once develop runs this workflow; until then only the test branch does, with the test key
+  FLAVOUR: ${{ github.ref == 'refs/heads/extension-build/release-test' && 'TEST' || 'REAL' }}
+  AWS_REGION: us-west-2
 
 defaults:
   run:
@@ -63,15 +73,24 @@ jobs:
   sign-and-upload:
     name: Sign and upload
     needs: [duckdb-version, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write # DXR-10: kms:Sign with the DXR-9 key, and the create-only build/ upload
+      id-token: write # DXR-10: the signer role, kms:Sign with the DXR-9 key and the create-only build/ upload
     outputs:
       unsigned_sha256: ${{ steps.stamp.outputs.unsigned_sha256 }}
+      signed_sha256: ${{ steps.sign.outputs.signed_sha256 }}
+      gzip_sha256: ${{ steps.sign.outputs.gzip_sha256 }}
+      key_fingerprint: ${{ steps.sign.outputs.key_fingerprint }}
+      build_key: ${{ steps.upload.outputs.build_key }}
     env:
       DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
     steps:
+      # the signing scripts, the committed public keys, and duckdb/scripts/compute-extension-hash.sh
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: 'true'
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ducklake-${{ needs.duckdb-version.outputs.duckdb_version }}-extension-linux_arm64
@@ -94,16 +113,90 @@ jobs:
           unsigned_sha256=$(head -c $((size - 256)) "$ext" | sha256sum | cut -d' ' -f1)
           echo "unsigned body: $((size - 256)) bytes, sha256 $unsigned_sha256"
           echo "unsigned_sha256=$unsigned_sha256" >> "$GITHUB_OUTPUT"
-      - name: Sign with KMS (placeholder)
+      - id: target
+        name: Check the repository variables
+        env:
+          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
+          SIGNING_KEY_ARN: ${{ vars[format('{0}_SIGNING_KEY_ARN', env.FLAVOUR)] }}
+          SIGNER_ROLE_ARN: ${{ vars[format('{0}_SIGNER_ROLE_ARN', env.FLAVOUR)] }}
         run: |
-          echo "placeholder: send the composite hash of the unsigned body to kms:Sign (DIGEST, RSASSA_PKCS1_V1_5_SHA_256)"
-          echo "placeholder: append the 256-byte signature, then verify against the committed public key before upload"
-      - name: Upload to build/ (placeholder)
+          [ -n "$BUCKET" ] && [ -n "$SIGNING_KEY_ARN" ] && [ -n "$SIGNER_ROLE_ARN" ] \
+            || { echo "::error::set the ${FLAVOUR}_* repository variables (terraform output github_repository_variables)"; exit 1; }
+          # the test flavour must never write outside test/, nor the real one inside it
+          expected_prefix=$([ "$FLAVOUR" = TEST ] && echo test/ || true)
+          [ "$PREFIX" = "$expected_prefix" ] || { echo "::error::${FLAVOUR}_EXTENSION_PREFIX is '$PREFIX', not '$expected_prefix'"; exit 1; }
+          echo "flavour $FLAVOUR: s3://$BUCKET/${PREFIX}, key $SIGNING_KEY_ARN, role $SIGNER_ROLE_ARN"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars[format('{0}_SIGNER_ROLE_ARN', env.FLAVOUR)] }}
+          role-session-name: ducklake-sign-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          aws-region: ${{ env.AWS_REGION }}
+      - id: sign
+        name: Sign with KMS
+        env:
+          SIGNING_KEY_ARN: ${{ vars[format('{0}_SIGNING_KEY_ARN', env.FLAVOUR)] }}
         run: |
-          echo "placeholder: create build/$GITHUB_SHA/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz, never overwrite it"
+          pub=.github/branching/signing-public-key$([ "$FLAVOUR" = TEST ] && echo .test || true).pem
+          mkdir signed
+          scripts/branching/release/sign.sh artifact/ducklake.duckdb_extension "$pub" signed/ducklake.duckdb_extension
+          gzip -9 -n -c signed/ducklake.duckdb_extension > signed/ducklake.duckdb_extension.gz
+          signed_sha256=$(sha256sum < signed/ducklake.duckdb_extension | cut -d' ' -f1)
+          gzip_sha256=$(sha256sum < signed/ducklake.duckdb_extension.gz | cut -d' ' -f1)
+          key_fingerprint=$(openssl pkey -pubin -in "$pub" -outform DER | sha256sum | cut -d' ' -f1)
+          echo "signed sha256 $signed_sha256, gzip sha256 $gzip_sha256, key $key_fingerprint ($pub)"
+          {
+            echo "signed_sha256=$signed_sha256"
+            echo "gzip_sha256=$gzip_sha256"
+            echo "key_fingerprint=$key_fingerprint"
+          } >> "$GITHUB_OUTPUT"
+      # DXR-11: created once under its commit, never replaced. The bucket policy refuses a PutObject under build/
+      # without If-None-Match, so a second upload of the same commit fails here instead of overwriting.
+      - id: upload
+        name: Upload to build/
+        env:
+          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
+          UNSIGNED_SHA256: ${{ steps.stamp.outputs.unsigned_sha256 }}
+          SIGNED_SHA256: ${{ steps.sign.outputs.signed_sha256 }}
+          GZIP_SHA256: ${{ steps.sign.outputs.gzip_sha256 }}
+        run: |
+          key="${PREFIX}build/$GITHUB_SHA/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
+          echo "creating s3://$BUCKET/$key"
+          if ! out=$(aws s3api put-object --bucket "$BUCKET" --key "$key" --body signed/ducklake.duckdb_extension.gz \
+              --if-none-match '*' --checksum-algorithm SHA256 \
+              --metadata "gzip-sha256=$GZIP_SHA256,signed-sha256=$SIGNED_SHA256,unsigned-sha256=$UNSIGNED_SHA256" \
+              --output json 2>&1); then
+            if grep -q PreconditionFailed <<< "$out"; then
+              echo "::error::s3://$BUCKET/$key already exists; a build is uploaded once and never replaced (DXR-11)"
+            else
+              echo "::error::upload failed: $out"
+            fi
+            exit 1
+          fi
+          version_id=$(jq -r '.VersionId' <<< "$out")
+          echo "created s3://$BUCKET/$key, version $version_id"
+          {
+            echo "build_key=$key"
+            echo "version_id=$version_id"
+          } >> "$GITHUB_OUTPUT"
+      # the smoke test installs this exact file
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ducklake-signed-linux_arm64
+          path: signed/ducklake.duckdb_extension.gz
+          if-no-files-found: error
+      # DXR-18
       - name: Summary
         env:
+          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
           UNSIGNED_SHA256: ${{ steps.stamp.outputs.unsigned_sha256 }}
+          SIGNED_SHA256: ${{ steps.sign.outputs.signed_sha256 }}
+          GZIP_SHA256: ${{ steps.sign.outputs.gzip_sha256 }}
+          KEY_FINGERPRINT: ${{ steps.sign.outputs.key_fingerprint }}
+          BUILD_KEY: ${{ steps.upload.outputs.build_key }}
+          VERSION_ID: ${{ steps.upload.outputs.version_id }}
         run: |
           {
             echo "### Build"
@@ -111,10 +204,15 @@ jobs:
             echo "|---|---|"
             echo "| commit | \`$GITHUB_SHA\` |"
             echo "| ref | \`$GITHUB_REF\` |"
+            echo "| flavour | \`$FLAVOUR\` |"
             echo "| DuckDB | \`$DUCKDB_VERSION\` |"
             echo "| platform | \`linux_arm64\` |"
             echo "| unsigned body SHA-256 | \`$UNSIGNED_SHA256\` |"
-            echo "| signed file, gzip, key fingerprint | not signed yet (placeholder) |"
+            echo "| signed file SHA-256 | \`$SIGNED_SHA256\` |"
+            echo "| gzip SHA-256 | \`$GZIP_SHA256\` |"
+            echo "| key fingerprint (SHA-256 of the DER public key) | \`$KEY_FINGERPRINT\` |"
+            echo "| object | \`s3://$BUCKET/$BUILD_KEY\` |"
+            echo "| object version | \`$VERSION_ID\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   smoke:
