@@ -69,8 +69,9 @@ current_version=$(jq -r '.VersionId // "none"' <<< "$new")
 	|| fail "$DST is now version $current_version, not $version that this copy created; another write landed after it"
 checksum=$(jq -r '.ChecksumSHA256 // empty' <<< "$new")
 recorded=$(jq -r '.Metadata["gzip-sha256"] // empty' <<< "$new")
-[ "$checksum" = "$(b64_of_hex "$EXPECTED")" ] && [ "$recorded" = "$EXPECTED" ] \
-	|| fail "$DST version $version has SHA-256 $checksum (recorded $recorded), not the build's $EXPECTED"
+if [ "$checksum" != "$(b64_of_hex "$EXPECTED")" ] || [ "$recorded" != "$EXPECTED" ]; then
+	fail "$DST version $version has SHA-256 $checksum (recorded $recorded), not the build's $EXPECTED"
+fi
 log "published $DST version $version, SHA-256 $EXPECTED"
 printf 'previous_version=%s\nprevious_gzip_sha256=%s\nversion=%s\netag=%s\n' \
 	"$previous_version" "$previous_sha" "$version" "$(jq -r '.ETag' <<< "$new")"
