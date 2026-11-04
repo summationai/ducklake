@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests promote.sh (DXR-12) without AWS: a stub `aws` keeps a versioned bucket in a directory and honours
-# If-None-Match / If-Match on copy-object the way S3 does.
+# If-None-Match / If-Match / x-amz-copy-source-if-match on copy-object the way S3 does.
 #
 #   scripts/branching/release/test_promote.sh
 set -uo pipefail
@@ -19,7 +19,7 @@ root = os.environ["STUB_BUCKET_DIR"]
 args = sys.argv[1:]
 op, opts, i = args[1], {}, 2
 while i < len(args):
-    if args[i] + " " in "--bucket --copy-source --key --metadata-directive --checksum-algorithm --if-none-match --if-match --output --version-id --checksum-mode ":
+    if args[i] + " " in "--bucket --copy-source --key --metadata-directive --checksum-algorithm --if-none-match --if-match --copy-source-if-match --output --version-id --checksum-mode ":
         opts[args[i]] = args[i + 1]; i += 2
     else:
         sys.exit(f"stub aws: unexpected argument {args[i]}")
@@ -34,8 +34,13 @@ def put(key, body_sha, metadata):
     save(key, versions + [v]); return v
 if op == "copy-object":
     if os.environ.get("STUB_DENY"): error("AccessDenied", 403, "CopyObject")
-    src = load(opts["--copy-source"].split("/", 1)[1])
+    src_key = opts["--copy-source"].split("/", 1)[1]
+    if os.environ.get("STUB_SRC_SWAP"):  # the build object changes between its check and the copy
+        put(src_key, "9" * 64, load(src_key)[-1]["Metadata"])
+    src = load(src_key)
     if not src: error("NoSuchKey", 404, "CopyObject")
+    if "--copy-source-if-match" in opts and src[-1]["ETag"] != opts["--copy-source-if-match"]:
+        error("PreconditionFailed", 412, "CopyObject")
     current = load(opts["--key"])
     if "--if-none-match" in opts and current: error("PreconditionFailed", 412, "CopyObject")
     if "--if-match" in opts:
@@ -66,15 +71,18 @@ printf '#!/usr/bin/env bash\nexec python3 -I "%s" "$@"\n' "$WORK/s3.py" > "$WORK
 chmod +x "$WORK/bin/aws"
 export PATH="$WORK/bin:$PATH" STUB_BUCKET_DIR="$WORK/bucket"
 
-seed() { # <build key> <sha256>: an uploaded build
+seed() { # <build key> <sha256> [<sha256 of the bytes>]: an uploaded build, version b-<first 6 of the sha256>
 	python3 -I -c '
 import json, os, sys
-key, sha = sys.argv[1], sys.argv[2]
-json.dump([{"VersionId": "b-" + sha[:6], "ETag": "\"e-%s\"" % sha[:6], "sha": sha, "Metadata": {"gzip-sha256": sha}}],
-          open(os.path.join(os.environ["STUB_BUCKET_DIR"], key.replace("/", "%")), "w"))' "$1" "$2"
+key, sha, body = sys.argv[1], sys.argv[2], sys.argv[3]
+json.dump([{"VersionId": "b-" + sha[:6], "ETag": "\"e-%s\"" % sha[:6], "sha": body, "Metadata": {"gzip-sha256": sha}}],
+          open(os.path.join(os.environ["STUB_BUCKET_DIR"], key.replace("/", "%")), "w"))' "$1" "$2" "${3:-$2}"
 }
 versions() { python3 -I -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$WORK/bucket/$(tr / % <<< "$1")" 2> /dev/null || echo 0; }
-promote() { bash "$HERE/promote.sh" bucket "$1" test/canary/v2.0.0/linux_arm64/ducklake.duckdb_extension.gz "$2" > "$WORK/out" 2> "$WORK/err"; }
+promote() { # <build key> <sha256> [<build version>]
+	bash "$HERE/promote.sh" bucket "$1" "${3:-b-${2:0:6}}" test/canary/v2.0.0/linux_arm64/ducklake.duckdb_extension.gz "$2" \
+		> "$WORK/out" 2> "$WORK/err"
+}
 DST=test/canary/v2.0.0/linux_arm64/ducklake.duckdb_extension.gz
 A=$(printf a%.0s {1..64})
 B=$(printf b%.0s {1..64})
@@ -124,6 +132,14 @@ else
 	flunk "corrupt copy: $(cat "$WORK/err")"
 fi
 
+# 5b. the retry after that (the channel records the build but holds other bytes) replaces it instead of skipping
+if promote test/build/ccc/x.gz "$C" && ! grep -q 'already holds' "$WORK/err" \
+	&& grep -q "::warning::promote: .*records this build but its SHA-256" "$WORK/err"; then
+	pass "a retry replaces a channel object whose metadata is the build's but whose bytes aren't"
+else
+	flunk "retry after a corrupt copy: $(cat "$WORK/err")"
+fi
+
 # 6. a write that lands between the copy and the read-back is caught, not checked in place of ours
 if STUB_LATE_WRITE=1 promote test/build/ddd/x.gz "$D"; then
 	flunk "a write after the copy went unnoticed"
@@ -140,6 +156,36 @@ elif grep -q 'AccessDenied' "$WORK/err" && ! grep -q '::warning' "$WORK/err"; th
 	pass "an access error fails closed"
 else
 	flunk "denied: $(cat "$WORK/err")"
+fi
+
+# 8. a build object whose bytes aren't its recorded digest is never copied
+E=$(printf e%.0s {1..64})
+seed test/build/eee/x.gz "$E" "$(printf 0%.0s {1..64})"
+before=$(versions "$DST")
+if promote test/build/eee/x.gz "$E"; then
+	flunk "a corrupt build was published"
+elif grep -q 'nothing copied' "$WORK/err" && [ "$(versions "$DST")" = "$before" ]; then
+	pass "a build whose bytes differ from its digest fails before any copy"
+else
+	flunk "corrupt build: $(versions "$DST") versions; $(cat "$WORK/err")"
+fi
+
+# 9. a build object that isn't the version the signing job uploaded is never copied
+if promote test/build/aaa/x.gz "$A" b-other; then
+	flunk "another version of the build was published"
+elif grep -q "not b-other that the signing job uploaded" "$WORK/err" && [ "$(versions "$DST")" = "$before" ]; then
+	pass "a build object other than the uploaded version fails before any copy"
+else
+	flunk "wrong build version: $(cat "$WORK/err")"
+fi
+
+# 10. a build object that changes after its check is not copied
+if STUB_SRC_SWAP=1 promote test/build/aaa/x.gz "$A"; then
+	flunk "a build that changed after its check was published"
+elif [ "$(versions "$DST")" = "$before" ]; then
+	pass "a build that changes between its check and the copy is not copied (copy-source If-Match)"
+else
+	flunk "swapped build: $(versions "$DST") versions; $(cat "$WORK/err")"
 fi
 
 echo
