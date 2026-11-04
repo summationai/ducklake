@@ -12,9 +12,9 @@ H=$(printf 'a%.0s' {1..64})
 
 both=(GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 DUCKDB_VERSION=v2.0.0
 	UNSIGNED_SHA256="$H" SIGNED_SHA256="$H" GZIP_SHA256="$H" KEY_FINGERPRINT="$H")
-build=("${both[@]}" GITHUB_REF=refs/heads/extension-build/release-test FLAVOUR=TEST
-	OBJECT=s3://bucket/test/build/x/v2.0.0/linux_arm64/ducklake.duckdb_extension.gz OBJECT_VERSION=v1)
-canary=("${both[@]}" FROM=s3://bucket/test/build/x.gz TO=s3://bucket/test/canary/x.gz
+build=("${both[@]}" GITHUB_REF=refs/heads/develop
+	OBJECT=s3://bucket/build/x/v2.0.0/linux_arm64/ducklake.duckdb_extension.gz OBJECT_VERSION=v1)
+canary=("${both[@]}" FROM=s3://bucket/build/x.gz TO=s3://bucket/canary/x.gz
 	PREVIOUS_VERSION=v0 PREVIOUS_SHA256="$H" VERSION=v1 APPROVED_BY=pssaravanan
 	APPROVED_AT=2026-11-04T10:00:00Z PUBLISHED_AT=2026-11-04T10:01:00Z)
 

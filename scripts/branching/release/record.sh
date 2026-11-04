@@ -8,7 +8,7 @@
 #
 # The fields come from the environment:
 #   both:   GITHUB_SHA, DUCKDB_VERSION, UNSIGNED_SHA256, SIGNED_SHA256, GZIP_SHA256, KEY_FINGERPRINT
-#   build:  GITHUB_REF, FLAVOUR, OBJECT (s3://bucket/key), OBJECT_VERSION
+#   build:  GITHUB_REF, OBJECT (s3://bucket/key), OBJECT_VERSION
 #   canary: FROM, TO (s3://bucket/key), PREVIOUS_VERSION and PREVIOUS_SHA256 (`none` on a first publish), VERSION,
 #           APPROVED_BY, APPROVED_AT, PUBLISHED_AT (ISO 8601 UTC)
 set -uo pipefail
@@ -36,7 +36,6 @@ for f in UNSIGNED_SHA256 SIGNED_SHA256 GZIP_SHA256 KEY_FINGERPRINT; do need "$f"
 case $KIND in
 build)
 	need GITHUB_REF '^refs/' "a ref"
-	need FLAVOUR '^(TEST|REAL)$' "TEST or REAL"
 	need OBJECT '^s3://[^/]+/.+' "an s3:// object"
 	need OBJECT_VERSION "$ANY" "an object version"
 	;;
@@ -67,7 +66,7 @@ fi
 echo "| | |"
 echo "|---|---|"
 row commit "$GITHUB_SHA"
-[ "$KIND" = build ] && row ref "$GITHUB_REF" && row flavour "$FLAVOUR"
+[ "$KIND" = build ] && row ref "$GITHUB_REF"
 row DuckDB "$DUCKDB_VERSION"
 [ "$KIND" = build ] && row platform linux_arm64
 row "unsigned body SHA-256" "$UNSIGNED_SHA256"

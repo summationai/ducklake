@@ -11,9 +11,8 @@
 # records S3 version IDs instead of GCS generations.
 #
 # Each job that touches AWS assumes its own role through GitHub's OIDC token; the roles, the KMS key and the bucket
-# come from repository variables (terraform output github_repository_variables), never from this file. A push to
-# develop uses the REAL_* roles and key and the top-level prefixes. The TEST_* roles, the test key that no reader trusts
-# and the test/ prefix belong to extension-build/release-test, which no longer triggers this workflow.
+# come from the REAL_* repository variables (terraform output github_repository_variables), never from this file, and
+# it writes under the bucket's top-level prefixes.
 # Only the jobs that sign or publish get id-token: write. The build runs DuckDB's tooling and gets no cloud identity.
 #
 name: Branching Release
@@ -26,7 +25,6 @@ on:
 permissions: {}
 
 env:
-  FLAVOUR: ${{ github.ref == 'refs/heads/extension-build/release-test' && 'TEST' || 'REAL' }}
   AWS_REGION: us-west-2
 
 defaults:
@@ -120,29 +118,28 @@ jobs:
       - id: target
         name: Check the repository variables
         env:
-          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
-          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
-          SIGNING_KEY_ARN: ${{ vars[format('{0}_SIGNING_KEY_ARN', env.FLAVOUR)] }}
-          SIGNER_ROLE_ARN: ${{ vars[format('{0}_SIGNER_ROLE_ARN', env.FLAVOUR)] }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
+          PREFIX: ${{ vars.REAL_EXTENSION_PREFIX }}
+          SIGNING_KEY_ARN: ${{ vars.REAL_SIGNING_KEY_ARN }}
+          SIGNER_ROLE_ARN: ${{ vars.REAL_SIGNER_ROLE_ARN }}
         run: |
           [ -n "$BUCKET" ] && [ -n "$SIGNING_KEY_ARN" ] && [ -n "$SIGNER_ROLE_ARN" ] \
-            || { echo "::error::set the ${FLAVOUR}_* repository variables (terraform output github_repository_variables)"; exit 1; }
-          # the test flavour must never write outside test/, nor the real one inside it
-          expected_prefix=$([ "$FLAVOUR" = TEST ] && echo test/ || true)
-          [ "$PREFIX" = "$expected_prefix" ] || { echo "::error::${FLAVOUR}_EXTENSION_PREFIX is '$PREFIX', not '$expected_prefix'"; exit 1; }
-          echo "flavour $FLAVOUR: s3://$BUCKET/${PREFIX}, key $SIGNING_KEY_ARN, role $SIGNER_ROLE_ARN"
+            || { echo "::error::set the REAL_* repository variables (terraform output github_repository_variables)"; exit 1; }
+          # the builds and channels are at the bucket's top level
+          [ -z "$PREFIX" ] || { echo "::error::REAL_EXTENSION_PREFIX is '$PREFIX', not empty"; exit 1; }
+          echo "s3://$BUCKET/, key $SIGNING_KEY_ARN, role $SIGNER_ROLE_ARN"
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars[format('{0}_SIGNER_ROLE_ARN', env.FLAVOUR)] }}
+          role-to-assume: ${{ vars.REAL_SIGNER_ROLE_ARN }}
           role-session-name: ducklake-sign-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 900
           aws-region: ${{ env.AWS_REGION }}
       - id: sign
         name: Sign with KMS
         env:
-          SIGNING_KEY_ARN: ${{ vars[format('{0}_SIGNING_KEY_ARN', env.FLAVOUR)] }}
+          SIGNING_KEY_ARN: ${{ vars.REAL_SIGNING_KEY_ARN }}
         run: |
-          pub=.github/branching/signing-public-key$([ "$FLAVOUR" = TEST ] && echo .test || true).pem
+          pub=.github/branching/signing-public-key.pem
           mkdir signed
           scripts/branching/release/sign.sh artifact/ducklake.duckdb_extension "$pub" signed/ducklake.duckdb_extension
           gzip -9 -n -c signed/ducklake.duckdb_extension > signed/ducklake.duckdb_extension.gz
@@ -161,8 +158,8 @@ jobs:
       - id: upload
         name: Upload to build/
         env:
-          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
-          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
+          PREFIX: ${{ vars.REAL_EXTENSION_PREFIX }}
           UNSIGNED_SHA256: ${{ steps.stamp.outputs.unsigned_sha256 }}
           SIGNED_SHA256: ${{ steps.sign.outputs.signed_sha256 }}
           GZIP_SHA256: ${{ steps.sign.outputs.gzip_sha256 }}
@@ -180,7 +177,7 @@ jobs:
       # DXR-18: fails if any field is missing or malformed
       - name: Record the build
         env:
-          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
           UNSIGNED_SHA256: ${{ steps.stamp.outputs.unsigned_sha256 }}
           SIGNED_SHA256: ${{ steps.sign.outputs.signed_sha256 }}
           GZIP_SHA256: ${{ steps.sign.outputs.gzip_sha256 }}
@@ -221,10 +218,10 @@ jobs:
       - name: Smoke test
         env:
           DUCKDB: ${{ github.workspace }}/cli/duckdb
-          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
-          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
+          PREFIX: ${{ vars.REAL_EXTENSION_PREFIX }}
         run: |
-          pub=.github/branching/signing-public-key$([ "$FLAVOUR" = TEST ] && echo .test || true).pem
+          pub=.github/branching/signing-public-key.pem
           repository="https://$BUCKET.s3.$AWS_REGION.amazonaws.com/${PREFIX}build/$GITHUB_SHA"
           scripts/branching/release/smoke.sh "$repository" "$pub" signed/ducklake.duckdb_extension.gz
           {
@@ -261,7 +258,7 @@ jobs:
           persist-credentials: false
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars[format('{0}_CANARY_WRITER_ROLE_ARN', env.FLAVOUR)] }}
+          role-to-assume: ${{ vars.REAL_CANARY_WRITER_ROLE_ARN }}
           role-session-name: ducklake-canary-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 900
           aws-region: ${{ env.AWS_REGION }}
@@ -270,11 +267,10 @@ jobs:
       - id: promote
         name: Copy the build to canary/
         env:
-          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
-          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
+          PREFIX: ${{ vars.REAL_EXTENSION_PREFIX }}
         run: |
-          expected_prefix=$([ "$FLAVOUR" = TEST ] && echo test/ || true)
-          [ "$PREFIX" = "$expected_prefix" ] || { echo "::error::${FLAVOUR}_EXTENSION_PREFIX is '$PREFIX', not '$expected_prefix'"; exit 1; }
+          [ -z "$PREFIX" ] || { echo "::error::REAL_EXTENSION_PREFIX is '$PREFIX', not empty"; exit 1; }
           dst="${PREFIX}canary/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
           scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$BUILD_VERSION" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
           echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
@@ -283,7 +279,7 @@ jobs:
       - name: Record the publication
         env:
           GH_TOKEN: ${{ github.token }}
-          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
           CHANNEL_KEY: ${{ steps.promote.outputs.channel_key }}
           PREVIOUS_VERSION: ${{ steps.promote.outputs.previous_version }}
           PREVIOUS_SHA256: ${{ steps.promote.outputs.previous_gzip_sha256 }}
