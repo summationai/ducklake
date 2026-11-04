@@ -268,8 +268,8 @@ jobs:
   publish-canary:
     name: Publish to canary/
     needs: [duckdb-version, sign-and-upload, smoke]
-    runs-on: ubuntu-latest
-    # DXR-12: waits for an approval by @summationai/ducklake-admins, the canary environment's required reviewers
+    runs-on: ubuntu-24.04
+    # DXR-12: waits for an approval by one of the canary environment's required reviewers
     environment: canary
     # one publication at a time; a newer pending run replaces an older pending one
     concurrency:
@@ -277,20 +277,85 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      actions: read # who approved this run, for DXR-18
       id-token: write # DXR-10: the canary/ writer
     env:
       DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
-      UNSIGNED_SHA256: ${{ needs.sign-and-upload.outputs.unsigned_sha256 }}
+      GZIP_SHA256: ${{ needs.sign-and-upload.outputs.gzip_sha256 }}
+      BUILD_KEY: ${{ needs.sign-and-upload.outputs.build_key }}
     steps:
-      - name: Publish (placeholder)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          sparse-checkout: scripts/branching/release
+          persist-credentials: false
+      # DXR-12 step 4: an older run approved after a newer commit landed skips instead of moving canary/ backwards
+      - id: head
+        name: Check the build is still the branch's head
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "approved: $GITHUB_SHA for canary/ (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT)"
-          echo "placeholder: skip, logging 'superseded by <sha>', if $GITHUB_SHA is no longer the head of $GITHUB_REF_NAME"
-          echo "placeholder: copy build/$GITHUB_SHA/ to canary/ with ifGenerationMatch on the current generation (0 when"
-          echo "  empty), then check the copy's SHA-256"
+          echo "approved: $GITHUB_SHA for canary/ (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT) at $(date -u +%FT%TZ)"
+          status=0
+          scripts/branching/release/still_head.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA" || status=$?
+          case $status in
+          0) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+          3) echo "publish=false" >> "$GITHUB_OUTPUT"
+             echo "### canary/: skipped, \`$GITHUB_SHA\` is no longer the head of \`$GITHUB_REF_NAME\`" >> "$GITHUB_STEP_SUMMARY" ;;
+          *) exit "$status" ;;
+          esac
+      - if: steps.head.outputs.publish == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars[format('{0}_CANARY_WRITER_ROLE_ARN', env.FLAVOUR)] }}
+          role-session-name: ducklake-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          aws-region: ${{ env.AWS_REGION }}
+      # DXR-12 step 5: S3 conditional copy (If-None-Match on a first publish, If-Match on the current ETag after), then
+      # a SHA-256 check of the copy
+      - id: promote
+        if: steps.head.outputs.publish == 'true'
+        name: Copy the build to canary/
+        env:
+          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          PREFIX: ${{ vars[format('{0}_EXTENSION_PREFIX', env.FLAVOUR)] }}
+        run: |
+          expected_prefix=$([ "$FLAVOUR" = TEST ] && echo test/ || true)
+          [ "$PREFIX" = "$expected_prefix" ] || { echo "::error::${FLAVOUR}_EXTENSION_PREFIX is '$PREFIX', not '$expected_prefix'"; exit 1; }
+          dst="${PREFIX}canary/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
+          scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
+          echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
+      # DXR-18
+      - if: steps.head.outputs.publish == 'true'
+        name: Summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
+          CHANNEL_KEY: ${{ steps.promote.outputs.channel_key }}
+          PREVIOUS_VERSION: ${{ steps.promote.outputs.previous_version }}
+          PREVIOUS_SHA256: ${{ steps.promote.outputs.previous_gzip_sha256 }}
+          VERSION: ${{ steps.promote.outputs.version }}
+          UNSIGNED_SHA256: ${{ needs.sign-and-upload.outputs.unsigned_sha256 }}
+          SIGNED_SHA256: ${{ needs.sign-and-upload.outputs.signed_sha256 }}
+          KEY_FINGERPRINT: ${{ needs.sign-and-upload.outputs.key_fingerprint }}
+        run: |
+          approvers=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved" and any(.environments[]; .name == "canary")) | .user.login] | unique | join(", ")')
           {
-            echo "### canary/: placeholder, nothing published"
-            echo "approved for \`$GITHUB_SHA\` (unsigned body \`$UNSIGNED_SHA256\`)"
+            echo "### canary/"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`$GITHUB_SHA\` |"
+            echo "| DuckDB | \`$DUCKDB_VERSION\` |"
+            echo "| unsigned body SHA-256 | \`$UNSIGNED_SHA256\` |"
+            echo "| signed file SHA-256 | \`$SIGNED_SHA256\` |"
+            echo "| gzip SHA-256 | \`$GZIP_SHA256\` |"
+            echo "| key fingerprint | \`$KEY_FINGERPRINT\` |"
+            echo "| from | \`s3://$BUCKET/$BUILD_KEY\` |"
+            echo "| to | \`s3://$BUCKET/$CHANNEL_KEY\` |"
+            echo "| object version before | \`$PREVIOUS_VERSION\` (gzip \`$PREVIOUS_SHA256\`) |"
+            echo "| object version after | \`$VERSION\` |"
+            echo "| approved by | ${approvers:-unknown} |"
+            echo "| published at | $(date -u +%FT%TZ) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-release:
@@ -313,5 +378,5 @@ jobs:
         run: |
           echo "approved: $GITHUB_SHA for release/ (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT)"
           echo "placeholder: publish only the newest $DUCKDB_VERSION-branching.ci.<n> tag's existing build/<sha>/, or an"
-          echo "  explicit rollback, with ifGenerationMatch and a SHA-256 check"
+          echo "  explicit rollback, through scripts/branching/release/promote.sh as canary/ does"
           echo "### release/: placeholder, nothing published" >> "$GITHUB_STEP_SUMMARY"

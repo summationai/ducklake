@@ -139,6 +139,10 @@ jobs:
       run: |
         scripts/branching/release/test_sign.sh
 
+    - name: Test promote.sh and still_head.sh (DXR-12)
+      run: |
+        scripts/branching/release/test_promote.sh
+
   coverage:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Code coverage
