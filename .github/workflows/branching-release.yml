@@ -12,21 +12,20 @@
 #
 # Each job that touches AWS assumes its own role through GitHub's OIDC token; the roles, the KMS key and the bucket
 # come from repository variables (terraform output github_repository_variables), never from this file. A push to
-# extension-build/release-test uses the TEST_* roles, the test key that no reader trusts, and the test/ prefix.
+# develop uses the REAL_* roles and key and the top-level prefixes. The TEST_* roles, the test key that no reader trusts
+# and the test/ prefix belong to extension-build/release-test, which no longer triggers this workflow.
 # Only the jobs that sign or publish get id-token: write. The build runs DuckDB's tooling and gets no cloud identity.
 #
 name: Branching Release
 on:
+  # DXR-8: every push to develop, which only an approved pull request can make
   push:
-    # TODO(DXR-8): build every push to develop, once signing and publishing are wired. Until then only the test branch
-    # runs this workflow.
     branches:
-      - extension-build/release-test
+      - develop
 
 permissions: {}
 
 env:
-  # TODO(DXR-8): REAL once develop runs this workflow; until then only the test branch does, with the test key
   FLAVOUR: ${{ github.ref == 'refs/heads/extension-build/release-test' && 'TEST' || 'REAL' }}
   AWS_REGION: us-west-2
 
