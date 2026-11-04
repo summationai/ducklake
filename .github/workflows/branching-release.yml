@@ -187,8 +187,8 @@ jobs:
           name: ducklake-signed-linux_arm64
           path: signed/ducklake.duckdb_extension.gz
           if-no-files-found: error
-      # DXR-18
-      - name: Summary
+      # DXR-18: fails if any field is missing or malformed
+      - name: Record the build
         env:
           BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
           UNSIGNED_SHA256: ${{ steps.stamp.outputs.unsigned_sha256 }}
@@ -196,24 +196,9 @@ jobs:
           GZIP_SHA256: ${{ steps.sign.outputs.gzip_sha256 }}
           KEY_FINGERPRINT: ${{ steps.sign.outputs.key_fingerprint }}
           BUILD_KEY: ${{ steps.upload.outputs.build_key }}
-          VERSION_ID: ${{ steps.upload.outputs.version_id }}
+          OBJECT_VERSION: ${{ steps.upload.outputs.version_id }}
         run: |
-          {
-            echo "### Build"
-            echo "| | |"
-            echo "|---|---|"
-            echo "| commit | \`$GITHUB_SHA\` |"
-            echo "| ref | \`$GITHUB_REF\` |"
-            echo "| flavour | \`$FLAVOUR\` |"
-            echo "| DuckDB | \`$DUCKDB_VERSION\` |"
-            echo "| platform | \`linux_arm64\` |"
-            echo "| unsigned body SHA-256 | \`$UNSIGNED_SHA256\` |"
-            echo "| signed file SHA-256 | \`$SIGNED_SHA256\` |"
-            echo "| gzip SHA-256 | \`$GZIP_SHA256\` |"
-            echo "| key fingerprint (SHA-256 of the DER public key) | \`$KEY_FINGERPRINT\` |"
-            echo "| object | \`s3://$BUCKET/$BUILD_KEY\` |"
-            echo "| object version | \`$VERSION_ID\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          OBJECT="s3://$BUCKET/$BUILD_KEY" scripts/branching/release/record.sh build >> "$GITHUB_STEP_SUMMARY"
 
   smoke:
     name: Smoke test
@@ -324,9 +309,10 @@ jobs:
           dst="${PREFIX}canary/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
           scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
           echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
-      # DXR-18
+      # DXR-18: fails if any field is missing or malformed. The approvals API has no approval time; the gated job
+      # starts right after the approval, so its start time is recorded as when.
       - if: steps.head.outputs.publish == 'true'
-        name: Summary
+        name: Record the publication
         env:
           GH_TOKEN: ${{ github.token }}
           BUCKET: ${{ vars[format('{0}_EXTENSION_BUCKET', env.FLAVOUR)] }}
@@ -338,25 +324,14 @@ jobs:
           SIGNED_SHA256: ${{ needs.sign-and-upload.outputs.signed_sha256 }}
           KEY_FINGERPRINT: ${{ needs.sign-and-upload.outputs.key_fingerprint }}
         run: |
-          approvers=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+          APPROVED_BY=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
             --jq '[.[] | select(.state == "approved" and any(.environments[]; .name == "canary")) | .user.login] | unique | join(", ")')
-          {
-            echo "### canary/"
-            echo "| | |"
-            echo "|---|---|"
-            echo "| commit | \`$GITHUB_SHA\` |"
-            echo "| DuckDB | \`$DUCKDB_VERSION\` |"
-            echo "| unsigned body SHA-256 | \`$UNSIGNED_SHA256\` |"
-            echo "| signed file SHA-256 | \`$SIGNED_SHA256\` |"
-            echo "| gzip SHA-256 | \`$GZIP_SHA256\` |"
-            echo "| key fingerprint | \`$KEY_FINGERPRINT\` |"
-            echo "| from | \`s3://$BUCKET/$BUILD_KEY\` |"
-            echo "| to | \`s3://$BUCKET/$CHANNEL_KEY\` |"
-            echo "| object version before | \`$PREVIOUS_VERSION\` (gzip \`$PREVIOUS_SHA256\`) |"
-            echo "| object version after | \`$VERSION\` |"
-            echo "| approved by | ${approvers:-unknown} |"
-            echo "| published at | $(date -u +%FT%TZ) |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          APPROVED_AT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name == "Publish to canary/") | .started_at')
+          PUBLISHED_AT=$(date -u +%FT%TZ)
+          export APPROVED_BY APPROVED_AT PUBLISHED_AT
+          FROM="s3://$BUCKET/$BUILD_KEY" TO="s3://$BUCKET/$CHANNEL_KEY" \
+            scripts/branching/release/record.sh canary >> "$GITHUB_STEP_SUMMARY"
 
   publish-release:
     name: Publish to release/
