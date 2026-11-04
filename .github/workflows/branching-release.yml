@@ -156,7 +156,8 @@ jobs:
             echo "key_fingerprint=$key_fingerprint"
           } >> "$GITHUB_OUTPUT"
       # DXR-11: created once under its commit, never replaced. The bucket policy refuses a PutObject under build/
-      # without If-None-Match, so a second upload of the same commit fails here instead of overwriting.
+      # without If-None-Match, so a second upload of the same commit fails here instead of overwriting; a rerun of this
+      # job after S3 accepted the upload reuses the object only if it holds these exact bytes.
       - id: upload
         name: Upload to build/
         env:
@@ -167,24 +168,9 @@ jobs:
           GZIP_SHA256: ${{ steps.sign.outputs.gzip_sha256 }}
         run: |
           key="${PREFIX}build/$GITHUB_SHA/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
-          echo "creating s3://$BUCKET/$key"
-          if ! out=$(aws s3api put-object --bucket "$BUCKET" --key "$key" --body signed/ducklake.duckdb_extension.gz \
-              --if-none-match '*' --checksum-algorithm SHA256 \
-              --metadata "gzip-sha256=$GZIP_SHA256,signed-sha256=$SIGNED_SHA256,unsigned-sha256=$UNSIGNED_SHA256" \
-              --output json 2>&1); then
-            if grep -q PreconditionFailed <<< "$out"; then
-              echo "::error::s3://$BUCKET/$key already exists; a build is uploaded once and never replaced (DXR-11)"
-            else
-              echo "::error::upload failed: $out"
-            fi
-            exit 1
-          fi
-          version_id=$(jq -r '.VersionId' <<< "$out")
-          echo "created s3://$BUCKET/$key, version $version_id"
-          {
-            echo "build_key=$key"
-            echo "version_id=$version_id"
-          } >> "$GITHUB_OUTPUT"
+          scripts/branching/release/upload.sh "$BUCKET" "$key" signed/ducklake.duckdb_extension.gz \
+            "$GZIP_SHA256" "$SIGNED_SHA256" "$UNSIGNED_SHA256" >> "$GITHUB_OUTPUT"
+          echo "build_key=$key" >> "$GITHUB_OUTPUT"
       # the smoke test installs this exact file
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
