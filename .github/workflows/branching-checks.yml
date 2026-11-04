@@ -143,6 +143,10 @@ jobs:
       run: |
         scripts/branching/release/test_promote.sh
 
+    - name: Test record.sh (DXR-18)
+      run: |
+        scripts/branching/release/test_record.sh
+
   coverage:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Code coverage
