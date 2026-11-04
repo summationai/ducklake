@@ -1,0 +1,157 @@
+# name: test/sql/branch/branch_basic.test
+# description: DML on a branch is isolated from main and persists across sessions
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_basic_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE prices(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO prices VALUES ('Jacket', 100), ('Boots', 80), ('Scarf', 20)
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+3
+
+query II
+CREATE BRANCH analysis FROM main
+----
+analysis	2
+
+query I
+FROM ducklake_current_branch('ducklake')
+----
+main
+
+query I
+SET BRANCH analysis
+----
+analysis
+
+query I
+FROM ducklake_current_branch('ducklake')
+----
+analysis
+
+# reading the branch before any change shows main at the fork
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	80
+Jacket	100
+Scarf	20
+
+statement ok
+UPDATE prices SET price = 110 WHERE item = 'Jacket'
+
+statement ok
+INSERT INTO prices VALUES ('Hat', 25)
+
+statement ok
+DELETE FROM prices WHERE item = 'Scarf'
+
+statement ok
+MERGE INTO prices USING (VALUES ('Boots', 85), ('Gloves', 30)) AS src(item, price) ON prices.item = src.item
+WHEN MATCHED THEN UPDATE SET price = src.price
+WHEN NOT MATCHED THEN INSERT VALUES (src.item, src.price)
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	85
+Gloves	30
+Hat	25
+Jacket	110
+
+# rows that existed at the fork keep their row ids
+query II
+SELECT item, rowid FROM prices WHERE rowid < 1000000000000000000 ORDER BY rowid
+----
+Jacket	0
+Boots	1
+
+# main is untouched and has no new snapshots
+query I
+SET BRANCH main
+----
+main
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	80
+Jacket	100
+Scarf	20
+
+query I
+SELECT COUNT(*) FROM ducklake_snapshots('ducklake')
+----
+3
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_commit
+----
+4
+
+# the branch survives a re-attach, with the same row ids
+statement ok
+CREATE TABLE memory.branch_rows(rid BIGINT, item VARCHAR, price INTEGER)
+
+statement ok
+SET BRANCH analysis
+
+statement ok
+INSERT INTO memory.branch_rows SELECT rowid, item, price FROM ducklake.prices
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_basic_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# a re-attached catalog starts on main
+query I
+FROM ducklake_current_branch('ducklake')
+----
+main
+
+statement ok
+SET BRANCH analysis
+
+query I
+SELECT COUNT(*) FROM (SELECT rowid AS rid, item, price FROM prices EXCEPT SELECT rid, item, price FROM memory.branch_rows)
+----
+0
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	85
+Gloves	30
+Hat	25
+Jacket	110
+
+query IIIII
+SELECT branch_id, branch_name, fork_snapshot_id, commit_count, created_at IS NOT NULL FROM ducklake_branches('ducklake')
+----
+1	analysis	2	4	true
