@@ -60,9 +60,13 @@ else
 fi
 version=$(jq -r '.VersionId // "none"' <<< "$out")
 
-# The copy must hold exactly the build's bytes
-new=$(aws s3api head-object --bucket "$BUCKET" --key "$DST" --version-id "$version" --checksum-mode ENABLED --output json 2>&1) \
-	|| fail "can't read back $DST version $version: $new"
+# The copy must hold exactly the build's bytes. The roles can't read a given version (no s3:GetObjectVersion), so this
+# reads the current object and requires it to be the version the copy created.
+new=$(aws s3api head-object --bucket "$BUCKET" --key "$DST" --checksum-mode ENABLED --output json 2>&1) \
+	|| fail "can't read back $DST: $new"
+current_version=$(jq -r '.VersionId // "none"' <<< "$new")
+[ "$current_version" = "$version" ] \
+	|| fail "$DST is now version $current_version, not $version that this copy created; another write landed after it"
 checksum=$(jq -r '.ChecksumSHA256 // empty' <<< "$new")
 recorded=$(jq -r '.Metadata["gzip-sha256"] // empty' <<< "$new")
 [ "$checksum" = "$(b64_of_hex "$EXPECTED")" ] && [ "$recorded" = "$EXPECTED" ] \
