@@ -255,12 +255,15 @@ jobs:
       run: |
         python3 -m unittest -v
 
-    # The baseline is the report of the latest coverage run on develop of this repository
+    # The baseline is the report of the latest coverage run on develop of this repository. It is required once the
+    # base already has this workflow (a run on develop has then left a report); only the pull request that adds it,
+    # whose base has none, runs without one.
     - name: Download baseline report
       if: github.event_name == 'pull_request'
       env:
         GH_TOKEN: ${{ github.token }}
         REPOSITORY: ${{ github.repository }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
         # A develop branch of a fork does not count
         LATEST: >-
           [.artifacts[] | select(.workflow_run.head_branch == "develop" and (.expired | not)
@@ -271,8 +274,14 @@ jobs:
           echo "baseline: $url"
           gh api "$url" > baseline.zip
           unzip -q baseline.zip -d baseline
+        elif err=$(gh api "repos/$REPOSITORY/contents/.github/workflows/branching-checks.yml?ref=$BASE_SHA" --silent 2>&1) \
+            || ! grep -q 'HTTP 404' <<< "$err"; then
+          # the base has this workflow, or GitHub couldn't say: fail closed
+          echo "::error::no unexpired coverage report of develop to compare with ${err:+($err)}; run Branching Checks" \
+            "on develop (workflow_dispatch) to make one, then re-run this check"
+          exit 1
         else
-          echo "::warning::no coverage report of develop yet; nothing to compare with"
+          echo "::warning::the base has no coverage check yet, so there is no report of develop to compare with"
         fi
 
     - name: Check coverage
