@@ -1,6 +1,10 @@
 #
-# Builds the DuckLake branching extension for the DuckDB the GizmoSQL clusters run, then signs, uploads, smoke-tests
-# and publishes it (spec: summationai/agent-cloud docs/specs/ducklake-extension-release.md, DXR-8 to DXR-18).
+# Builds the DuckLake branching extension for the DuckDB the GizmoSQL clusters run (linux_arm64 only), then signs,
+# uploads, smoke-tests and, after approval, publishes it to canary/ (spec: summationai/agent-cloud
+# docs/specs/ducklake-extension-release.md, DXR-8 to DXR-12, DXR-16, DXR-18).
+#
+# A release to release/ is not part of this push pipeline: it runs on a v2.0.0-branching.ci.<n> tag, reuses the build
+# of the tag's commit and never rebuilds (DXR-13 to DXR-15), and comes in a later pull request.
 #
 # The spec was written for GCS; the repository is S3 (summationai/code infra/gizmosql/extension-release). Where the
 # spec says ifGenerationMatch this uses S3 conditional writes (If-None-Match / If-Match on the ETag), and DXR-18
@@ -332,26 +336,3 @@ jobs:
           export APPROVED_BY APPROVED_AT PUBLISHED_AT
           FROM="s3://$BUCKET/$BUILD_KEY" TO="s3://$BUCKET/$CHANNEL_KEY" \
             scripts/branching/release/record.sh canary >> "$GITHUB_STEP_SUMMARY"
-
-  publish-release:
-    name: Publish to release/
-    needs: [duckdb-version, sign-and-upload, publish-canary]
-    runs-on: ubuntu-latest
-    # DXR-15: waits for an approval by @summationai/ducklake-admins, the release environment's required reviewers.
-    # TODO(DXR-13): runs on a v2.0.0-branching.ci.<n> tag, not on a push; until then it never publishes.
-    environment: release
-    concurrency:
-      group: publish-release
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      id-token: write # DXR-10: the release/ writer
-    env:
-      DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
-    steps:
-      - name: Publish (placeholder)
-        run: |
-          echo "approved: $GITHUB_SHA for release/ (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT)"
-          echo "placeholder: publish only the newest $DUCKDB_VERSION-branching.ci.<n> tag's existing build/<sha>/, or an"
-          echo "  explicit rollback, through scripts/branching/release/promote.sh as canary/ does"
-          echo "### release/: placeholder, nothing published" >> "$GITHUB_STEP_SUMMARY"
