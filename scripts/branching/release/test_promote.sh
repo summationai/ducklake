@@ -44,10 +44,13 @@ if op == "copy-object":
         if not current or current[-1]["ETag"] != opts["--if-match"]: error("PreconditionFailed", 412, "CopyObject")
     sha = "0" * 64 if os.environ.get("STUB_CORRUPT") else src[-1]["sha"]
     v = put(opts["--key"], sha, src[-1]["Metadata"])
+    if os.environ.get("STUB_LATE_WRITE"):  # another write lands right after this copy, before the read-back
+        put(opts["--key"], "e" * 64, {"gzip-sha256": "e" * 64})
     print(json.dumps({"CopyObjectResult": {"ETag": v["ETag"]}, "VersionId": v["VersionId"]}))
 elif op == "head-object":
     versions = load(opts["--key"])
-    if "--version-id" in opts: versions = [v for v in versions if v["VersionId"] == opts["--version-id"]]
+    # the writer roles have s3:GetObject but not s3:GetObjectVersion, so S3 refuses a read of a given version
+    if "--version-id" in opts: error("403", 403, "HeadObject")
     if not versions: error("403", 403, "HeadObject")  # without s3:ListBucket a missing key is a 403
     v = versions[-1]
     out = {"ETag": v["ETag"], "VersionId": v["VersionId"], "Metadata": v["Metadata"]}
@@ -81,6 +84,8 @@ C=$(printf c%.0s {1..64})
 seed test/build/aaa/x.gz "$A"
 seed test/build/bbb/x.gz "$B"
 seed test/build/ccc/x.gz "$C"
+D=$(printf d%.0s {1..64})
+seed test/build/ddd/x.gz "$D"
 
 # 1. the first publish to an empty channel works
 if promote test/build/aaa/x.gz "$A" && grep -q '^previous_version=none$' "$WORK/out" && [ "$(versions "$DST")" = 1 ]; then
@@ -121,7 +126,16 @@ else
 	flunk "corrupt copy: $(cat "$WORK/err")"
 fi
 
-# 6. any other error fails closed
+# 6. a write that lands between the copy and the read-back is caught, not checked in place of ours
+if STUB_LATE_WRITE=1 promote test/build/ddd/x.gz "$D"; then
+	flunk "a write after the copy went unnoticed"
+elif grep -q 'is now version' "$WORK/err"; then
+	pass "a write right after the copy fails the read-back instead of checking the other object"
+else
+	flunk "late write: $(cat "$WORK/err")"
+fi
+
+# 7. any other error fails closed
 if STUB_DENY=1 promote test/build/ccc/x.gz "$C"; then
 	flunk "an AccessDenied copy succeeded"
 elif grep -q 'AccessDenied' "$WORK/err" && ! grep -q '::warning' "$WORK/err"; then
@@ -130,7 +144,7 @@ else
 	flunk "denied: $(cat "$WORK/err")"
 fi
 
-# 7-8. still_head.sh: publish only the branch's newest commit
+# 8-10. still_head.sh: publish only the branch's newest commit
 S1=$(printf 1%.0s {1..40})
 S2=$(printf 2%.0s {1..40})
 if STUB_HEAD=$S1 bash "$HERE/still_head.sh" o/r develop "$S1" > /dev/null; then
