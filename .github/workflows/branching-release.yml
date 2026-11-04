@@ -86,6 +86,7 @@ jobs:
       gzip_sha256: ${{ steps.sign.outputs.gzip_sha256 }}
       key_fingerprint: ${{ steps.sign.outputs.key_fingerprint }}
       build_key: ${{ steps.upload.outputs.build_key }}
+      build_version: ${{ steps.upload.outputs.version_id }}
     env:
       DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
     steps:
@@ -266,6 +267,7 @@ jobs:
       DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
       GZIP_SHA256: ${{ needs.sign-and-upload.outputs.gzip_sha256 }}
       BUILD_KEY: ${{ needs.sign-and-upload.outputs.build_key }}
+      BUILD_VERSION: ${{ needs.sign-and-upload.outputs.build_version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -277,8 +279,8 @@ jobs:
           role-session-name: ducklake-canary-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 900
           aws-region: ${{ env.AWS_REGION }}
-      # DXR-12: S3 conditional copy (If-None-Match on a first publish, If-Match on the current ETag after), then
-      # a SHA-256 check of the copy
+      # DXR-12: verifies the uploaded build's version and SHA-256, then an S3 conditional copy of exactly that object
+      # (If-None-Match on a first publish, If-Match on the current ETag after), then a SHA-256 check of the copy
       - id: promote
         name: Copy the build to canary/
         env:
@@ -288,7 +290,7 @@ jobs:
           expected_prefix=$([ "$FLAVOUR" = TEST ] && echo test/ || true)
           [ "$PREFIX" = "$expected_prefix" ] || { echo "::error::${FLAVOUR}_EXTENSION_PREFIX is '$PREFIX', not '$expected_prefix'"; exit 1; }
           dst="${PREFIX}canary/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
-          scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
+          scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$BUILD_VERSION" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
           echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
       # DXR-18: fails if any field is missing or malformed. The approvals API has no approval time; the gated job
       # starts right after the approval, so its start time is recorded as when.
