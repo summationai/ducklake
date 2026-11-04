@@ -1,0 +1,127 @@
+# name: test/sql/branch/branch_syntax_off.test
+# description: With DUCKLAKE_BRANCH_SYNTAX=off the branch syntax is gone, nothing runs hidden behind it, and the functions still branch
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+require-env DUCKLAKE_BRANCH_SYNTAX off
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_syntax_off_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE prices(item VARCHAR, price INTEGER)
+
+statement ok
+INSERT INTO prices VALUES ('Jacket', 100), ('Boots', 80)
+
+# none of the four statements parses
+
+statement error
+CREATE BRANCH analysis
+----
+Parser Error
+
+statement error
+SET BRANCH main
+----
+Parser Error
+
+statement error
+MERGE BRANCH analysis ON CONFLICT KEEP BRANCH
+----
+Parser Error
+
+statement error
+DROP BRANCH IF EXISTS analysis
+----
+Parser Error
+
+# a branch statement fails like any syntax error: nothing behind it runs, and what came before it runs as DuckDB
+# runs the statements before a typo
+statement error
+SET BRANCH main; ATTACH ':memory:' AS hidden_after
+----
+Parser Error
+
+statement error
+SELEC 1; ATTACH ':memory:' AS typo_after
+----
+Parser Error
+
+statement error
+ATTACH ':memory:' AS hidden_before; SET BRANCH main
+----
+Parser Error
+
+statement error
+ATTACH ':memory:' AS typo_before; SELEC 1
+----
+Parser Error
+
+query TT
+SELECT 'hidden_after' IN (SELECT database_name FROM duckdb_databases()), 'hidden_before' IN (SELECT database_name FROM duckdb_databases()) = 'typo_before' IN (SELECT database_name FROM duckdb_databases())
+----
+false	true
+
+# the functions still branch: create, switch, change, merge, drop
+
+query II
+CALL ducklake_create_branch('ducklake', 'analysis')
+----
+analysis	2
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'analysis')
+
+query I
+FROM ducklake_current_branch('ducklake')
+----
+analysis
+
+statement ok
+UPDATE prices SET price = 90 WHERE item = 'Boots'
+
+# on a branch, errors name the function that leads back to main, since SET BRANCH doesn't parse here
+statement error
+CALL ducklake_merge_branch('ducklake', 'analysis')
+----
+CALL ducklake_set_branch('ducklake', 'main') first
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'main')
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	80
+Jacket	100
+
+statement ok
+CALL ducklake_merge_branch('ducklake', 'analysis')
+
+query II
+SELECT item, price FROM prices ORDER BY item
+----
+Boots	90
+Jacket	100
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'scratch')
+
+statement ok
+CALL ducklake_drop_branch('ducklake', 'scratch')
+
+query I
+SELECT count(*) FROM ducklake_branches('ducklake') WHERE branch_name = 'scratch'
+----
+0

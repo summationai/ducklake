@@ -1,4 +1,5 @@
 #include "ducklake_extension.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -19,6 +20,7 @@ ScalarFunction DuckLakeMurmur3Function();
 ScalarFunction DuckLakeUnreadableMacroDefaultFunction();
 
 static void LoadInternal(ExtensionLoader &loader) {
+	DuckLakeBranching::CheckLoadSettings();
 	loader.SetDescription("Adds support for DuckLake, SQL as a Lakehouse Format");
 
 	auto &instance = loader.GetDatabaseInstance();
@@ -128,6 +130,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto unreadable_macro_default_func = DuckLakeUnreadableMacroDefaultFunction();
 	loader.RegisterFunction(unreadable_macro_default_func);
+
+	DuckLakeBranching::Register(loader, config);
 }
 
 // LCOV_EXCL_START

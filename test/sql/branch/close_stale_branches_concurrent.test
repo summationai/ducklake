@@ -1,0 +1,80 @@
+# name: test/sql/branch/close_stale_branches_concurrent.test
+# description: a branch transaction in progress while its branch is closed fails at commit, and its rows are not archived
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+require icu
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/close_stale_branches_concurrent_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+SET BRANCH main
+
+statement ok
+UPDATE ducklake_meta.ducklake_branching_commit SET commit_time = NOW() - INTERVAL 40 DAY
+
+statement ok con1
+USE ducklake
+
+statement ok con1
+SET BRANCH b
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO t VALUES (3)
+
+query II
+SELECT branch_name, status FROM ducklake_close_stale_branches('ducklake', older_than => NOW() - INTERVAL 30 DAY)
+----
+b	closed
+
+statement error con1
+COMMIT
+----
+was changed or dropped by another transaction
+
+statement ok
+SET VARIABLE archive = (SELECT 'branch_archive.' || table_name FROM duckdb_tables() WHERE database_name = 'ducklake' AND schema_name = 'branch_archive')
+
+query I
+SELECT SUM(i) FROM query_table(getvariable('archive'))
+----
+3
+
+statement error con1
+SELECT SUM(i) FROM t
+----
+Branch "b" no longer exists - this connection is back on main
+
+query I con1
+SELECT SUM(i) FROM t
+----
+1

@@ -1,0 +1,118 @@
+# name: test/sql/branch/branch_functions.test
+# description: the function forms of the branch statements and their parameters
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_functions_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+query II
+CALL ducklake_create_branch('ducklake', 'f1', from_branch => 'main')
+----
+f1	2
+
+statement error
+CALL ducklake_create_branch('ducklake', 'f2', from_branch => 'f1')
+----
+Creating a branch from another branch is not supported yet
+
+statement error
+CALL ducklake_create_branch('ducklake', NULL)
+----
+Branch name cannot be NULL
+
+statement error
+CALL ducklake_create_branch('ducklake', '')
+----
+Branch name cannot be empty
+
+query II
+CALL ducklake_drop_branch('ducklake', 'missing', if_exists => true)
+----
+missing	false
+
+query II
+CALL ducklake_drop_branch('ducklake', 'f1', if_exists => true)
+----
+f1	true
+
+statement error
+CALL ducklake_drop_branch('ducklake', 'f1')
+----
+does not exist
+
+# a lake attached at a fixed snapshot has no branches
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_functions_files', METADATA_CATALOG 'ducklake_meta', SNAPSHOT_VERSION 1)
+
+statement error
+CALL ducklake_create_branch('ducklake', 'f3')
+----
+attached at a fixed snapshot
+
+statement error
+SELECT * FROM ducklake_branches('ducklake')
+----
+attached at a fixed snapshot
+
+# a read-only attach can read a branch, but not create or drop one
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_functions_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'ro')
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_functions_files', METADATA_CATALOG 'ducklake_meta', READ_ONLY)
+
+statement error
+CALL ducklake_create_branch('ducklake', 'ro2')
+----
+attached read-write
+
+statement error
+CALL ducklake_drop_branch('ducklake', 'ro')
+----
+attached read-write
+
+statement ok
+CALL ducklake_set_branch('ducklake', 'ro')
+
+query I
+SELECT COUNT(*) FROM ducklake.t
+----
+1

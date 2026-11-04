@@ -1,0 +1,232 @@
+# name: test/sql/branch/merge_ddl_preview.test
+# description: the dry run reports a branch's catalog changes object by object, and leaves the transaction clean
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_ddl_preview_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE r(i INTEGER)
+
+statement ok
+INSERT INTO r VALUES (1)
+
+statement ok
+CREATE TABLE d(i INTEGER)
+
+statement ok
+INSERT INTO d VALUES (1), (2)
+
+statement ok
+CREATE TABLE d_conflict(i INTEGER)
+
+statement ok
+CREATE TABLE both_renamed(i INTEGER)
+
+statement ok
+CREATE VIEW dv AS SELECT 1 AS one
+
+statement ok
+CREATE VIEW dv_conflict AS SELECT 1 AS one
+
+statement ok
+CREATE SCHEMA ds
+
+statement ok
+CREATE SCHEMA ds_both
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TABLE s.x AS SELECT range AS id FROM range(5)
+
+statement ok
+CREATE VIEW s.v AS SELECT id FROM s.x
+
+statement ok
+ALTER TABLE r RENAME TO r_new
+
+statement ok
+INSERT INTO r_new VALUES (2)
+
+statement ok
+DROP TABLE d
+
+statement ok
+DROP TABLE d_conflict
+
+statement ok
+ALTER TABLE both_renamed RENAME TO both_branch
+
+statement ok
+DROP VIEW dv
+
+statement ok
+DROP VIEW dv_conflict
+
+statement ok
+DROP SCHEMA ds
+
+statement ok
+DROP SCHEMA ds_both
+
+statement ok
+CREATE TABLE clash(i INTEGER)
+
+statement ok
+SET BRANCH main
+
+statement ok
+INSERT INTO d_conflict VALUES (1)
+
+statement ok
+ALTER TABLE both_renamed RENAME TO both_main
+
+statement ok
+COMMENT ON VIEW dv_conflict IS 'changed on main'
+
+statement ok
+CREATE TABLE clash(j INTEGER)
+
+statement ok
+DROP SCHEMA ds_both
+
+statement ok
+SET VARIABLE head = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+query IIIIIIIIIII
+CALL ducklake_merge_branch('ducklake', 'b', dry_run => true)
+----
+ds	NULL	ok	NULL	0	0	0	[dropped]	[]	schema	NULL
+ds_both	NULL	conflict	Transaction conflict - attempting to drop schema with index "8" - but another transaction has dropped it already	0	0	0	[dropped]	[dropped]	schema	NULL
+main	both_renamed	conflict	Transaction conflict - branch "b" renamed table "both_renamed", but main renamed it since the fork	0	0	0	[renamed]	[renamed]	table	both_branch
+main	clash	conflict	Transaction conflict - attempting to create table "clash" in schema "main" - but this table has been created by another transaction already	0	0	0	[created]	[]	table	NULL
+main	d	ok	NULL	0	0	0	[dropped]	[]	table	NULL
+main	d_conflict	conflict	Transaction conflict - branch "b" dropped table "d_conflict", but main inserted into it since the fork	0	0	0	[dropped]	[inserted_into]	table	NULL
+main	dv	ok	NULL	0	0	0	[dropped]	[]	view	NULL
+main	dv_conflict	conflict	Transaction conflict - branch "b" dropped view "dv_conflict", but main altered it since the fork	0	0	0	[dropped]	[altered]	view	NULL
+main	r	ok	NULL	1	0	1	[renamed, inserted_into]	[]	table	r_new
+s	NULL	ok	NULL	0	0	0	[created]	[]	schema	NULL
+s	v	ok	NULL	0	0	0	[created]	[]	view	NULL
+s	x	ok	NULL	5	0	1	[created, inserted_into]	[]	table	NULL
+
+# the merge fails as the dry run said
+statement error
+MERGE BRANCH b
+----
+Transaction conflict
+
+# nothing changed: no snapshot, main and the branch read as before
+query I
+SELECT MAX(snapshot_id) = getvariable('head') FROM ducklake_snapshots('ducklake')
+----
+true
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	both_main
+main	clash
+main	d
+main	d_conflict
+main	r
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+ds
+main
+
+statement ok
+SET BRANCH b
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	both_branch
+main	clash
+main	r_new
+s	x
+
+query I
+SELECT COUNT(*) FROM s.v
+----
+5
+
+# in a transaction, the dry run leaves the transaction's catalog as it was
+statement ok
+SET BRANCH main
+
+statement ok
+BEGIN
+
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'b', dry_run => true) WHERE status = 'conflict'
+----
+5
+
+query I
+SELECT COUNT(*) FROM r
+----
+1
+
+statement error
+SELECT * FROM s.x
+----
+does not exist
+
+statement ok
+COMMIT
+
+# a branch without conflicts merges as its dry run said
+statement ok
+CREATE BRANCH clean
+
+statement ok
+SET BRANCH clean
+
+statement ok
+CREATE TABLE clean_table AS SELECT 1 AS one
+
+statement ok
+ALTER TABLE r RENAME TO r_clean
+
+statement ok
+SET BRANCH main
+
+query IIIIIIIIIII
+CALL ducklake_merge_branch('ducklake', 'clean', dry_run => true)
+----
+main	clean_table	ok	NULL	1	0	1	[created, inserted_into]	[]	table	NULL
+main	r	ok	NULL	0	0	0	[renamed]	[]	table	r_clean
+
+statement ok
+MERGE BRANCH clean
+
+query I
+FROM clean_table
+----
+1
+
+query I
+FROM r_clean
+----
+1
