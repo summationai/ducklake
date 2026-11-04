@@ -1,0 +1,67 @@
+# name: test/sql/branch/branch_partitioned.test
+# description: DML on a partitioned table on a branch
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_partitioned_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE sales(region VARCHAR, amount INTEGER)
+
+statement ok
+ALTER TABLE sales SET PARTITIONED BY (region)
+
+statement ok
+INSERT INTO sales VALUES ('EU', 10), ('EU', 20), ('US', 30)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO sales VALUES ('EU', 40), ('APAC', 50)
+
+statement ok
+DELETE FROM sales WHERE region = 'US'
+
+statement ok
+UPDATE sales SET amount = amount * 2 WHERE region = 'EU'
+
+query II
+SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region
+----
+APAC	50
+EU	140
+
+query II
+SELECT region, SUM(amount) FROM sales WHERE region = 'EU' GROUP BY region
+----
+EU	140
+
+# each new file carries its partition values
+query I
+SELECT COUNT(DISTINCT partition_value) FROM ducklake_meta.ducklake_branching_file_partition_value
+----
+2
+
+statement ok
+SET BRANCH main
+
+query II
+SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region
+----
+EU	30
+US	30

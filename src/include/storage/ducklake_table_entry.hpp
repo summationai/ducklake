@@ -268,6 +268,7 @@ protected:
 	ColumnList columns;
 
 private:
+	friend class DuckLakeBranchManager;
 	TableIndex table_id;
 	string table_uuid;
 	string data_path;

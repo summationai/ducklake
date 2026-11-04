@@ -1,0 +1,101 @@
+# name: test/sql/branch/branch_snapshots.test
+# description: A branch lists main's snapshots up to its fork, and listing them first never makes it read main's head
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_snapshots_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2)
+
+query II
+CREATE BRANCH b FROM main
+----
+b	2
+
+# main moves past the fork
+statement ok
+INSERT INTO t VALUES (3)
+
+query II
+SELECT COUNT(*), MAX(snapshot_id) FROM ducklake_snapshots('ducklake')
+----
+4	3
+
+query I
+SET BRANCH b
+----
+b
+
+# the branch lists main's snapshots up to its fork
+query II
+SELECT COUNT(*), MAX(snapshot_id) FROM ducklake_snapshots('ducklake')
+----
+3	2
+
+# listing the snapshots before the first read still reads the branch at its fork
+statement ok
+BEGIN
+
+query I
+SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake')
+----
+2
+
+query I
+SELECT i FROM t ORDER BY i
+----
+1
+2
+
+statement ok
+INSERT INTO t VALUES (10)
+
+query I
+SELECT i FROM t ORDER BY i
+----
+1
+2
+10
+
+statement ok
+COMMIT
+
+# the branch commit is not a main snapshot
+query II
+SELECT COUNT(*), MAX(snapshot_id) FROM ducklake_snapshots('ducklake')
+----
+3	2
+
+query I
+SELECT i FROM t ORDER BY i
+----
+1
+2
+10
+
+query I
+SET BRANCH main
+----
+main
+
+query I
+SELECT i FROM t ORDER BY i
+----
+1
+2
+3
