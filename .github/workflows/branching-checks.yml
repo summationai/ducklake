@@ -139,7 +139,7 @@ jobs:
       run: |
         scripts/branching/release/test_sign.sh
 
-    - name: Test promote.sh and still_head.sh (DXR-12)
+    - name: Test promote.sh (DXR-12)
       run: |
         scripts/branching/release/test_promote.sh
 
