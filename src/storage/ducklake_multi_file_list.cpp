@@ -1,4 +1,5 @@
 #include "common/ducklake_util.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
@@ -451,7 +452,7 @@ idx_t DuckLakeMultiFileList::GetTotalFileCount() const {
 unique_ptr<NodeStatistics> DuckLakeMultiFileList::GetCardinality(ClientContext &context) const {
 	auto stats = read_info.table.GetTableStats(context);
 	if (!stats || stats->record_count_unknown) {
-		return nullptr;
+		return DuckLakeBranching::BranchCardinality(context, read_info.table);
 	}
 	return make_uniq<NodeStatistics>(stats->record_count);
 }
@@ -655,6 +656,11 @@ vector<DuckLakeFileListExtendedEntry> DuckLakeMultiFileList::GetFilesExtended() 
 
 void DuckLakeMultiFileList::ApplyLocalChanges(DuckLakeTransaction &transaction) const {
 	ApplyLocalFileChanges(transaction, read_info.table_id, files);
+	if (transaction.HasLocalDeletes(read_info.table_id)) {
+		for (auto &file_entry : files) {
+			DuckLakeBranching::PrepareLocalDelete(transaction, read_info.table_id, file_entry);
+		}
+	}
 	if (transaction.HasLocalInlinedFileDeletes(read_info.table_id)) {
 		for (auto &file_entry : files) {
 			if (file_entry.file_id.IsValid()) {

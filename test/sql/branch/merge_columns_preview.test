@@ -1,0 +1,113 @@
+# name: test/sql/branch/merge_columns_preview.test
+# description: the dry run of a merge with column changes: per table and per row, on the branch's columns
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_columns_preview_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE altered(a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO altered VALUES (1, 10), (2, 20)
+
+statement ok
+CREATE TABLE both_changes(a INTEGER)
+
+statement ok
+INSERT INTO both_changes VALUES (1)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+ALTER TABLE altered ADD COLUMN c VARCHAR DEFAULT 'none'
+
+statement ok
+ALTER TABLE altered DROP COLUMN b
+
+statement ok
+UPDATE altered SET c = 'set' WHERE a = 2
+
+statement ok
+INSERT INTO altered VALUES (3, 'new')
+
+statement ok
+ALTER TABLE both_changes ADD COLUMN x INTEGER
+
+statement ok
+ALTER TABLE both_changes RENAME TO both_changes_renamed
+
+statement ok
+CREATE TABLE created(i INTEGER, j INTEGER)
+
+statement ok
+INSERT INTO created VALUES (1, 2)
+
+statement ok
+ALTER TABLE created DROP COLUMN j
+
+statement ok
+SET BRANCH main
+
+# a column change is "altered"; only a real rename has a new name
+query TTTT
+SELECT table_name, status, branch_changes, new_name FROM ducklake_merge_branch('ducklake', 'b', dry_run => true) ORDER BY table_name
+----
+altered	ok	[inserted_into, deleted_from, altered]	NULL
+both_changes	ok	[renamed, altered]	both_changes_renamed
+created	ok	[created, inserted_into]	NULL
+
+# the rows on the branch's columns: the fork's rows read the added column as its default, the dropped one is left out;
+# row 1 changed no value, since the column changes alone are not row changes
+query IITIT
+SELECT change_type, rowid, merge_status, a, c FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'altered') ORDER BY rowid NULLS LAST, change_type DESC
+----
+update_preimage	1	ok	2	none
+update_postimage	1	ok	2	set
+insert	NULL	ok	3	new
+
+query IIT
+SELECT change_type, rowid, i FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'created')
+----
+insert	NULL	1
+
+query I
+SELECT COUNT(*) FROM ducklake_merge_branch('ducklake', 'b', dry_run => true, table_name => 'both_changes_renamed')
+----
+0
+
+# the dry run changed nothing; the merge does what it said
+statement ok
+MERGE BRANCH b
+
+query IT
+FROM altered ORDER BY a
+----
+1	none
+2	set
+3	new
+
+query II
+FROM both_changes_renamed
+----
+1	NULL
+
+query I
+FROM created
+----
+1

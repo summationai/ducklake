@@ -97,6 +97,13 @@ jobs:
       run: |
         make test_release
 
+    # require-env skips this test unless the variable is set before the process starts
+    - name: Test DUCKLAKE_BRANCH_SYNTAX=off
+      env:
+        DUCKLAKE_BRANCH_SYNTAX: 'off'
+      run: |
+        build/release/test/unittest test/sql/branch/branch_syntax_off.test
+
     - name: Test SQLite
       env:
         DUCKLAKE_CI: 1
@@ -193,6 +200,14 @@ jobs:
         LLVM_PROFILE_FILE: ${{ env.PROFILES }}/ducklake-%m.profraw
       run: |
         python3 duckdb/scripts/ci/run_tests.py build/codecov/test/unittest --retry 2 "test/*"
+
+    # require-env skips this test unless the variable is set before the process starts
+    - name: Test DUCKLAKE_BRANCH_SYNTAX=off
+      env:
+        LLVM_PROFILE_FILE: ${{ env.PROFILES }}/ducklake-%m.profraw
+        DUCKLAKE_BRANCH_SYNTAX: 'off'
+      run: |
+        build/codecov/test/unittest test/sql/branch/branch_syntax_off.test
 
     - name: Test SQLite
       env:
