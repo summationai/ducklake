@@ -1,6 +1,7 @@
 #
 # Builds the DuckLake branching extension for DuckDB v2.0.0 (.github/duckdb-version), the DuckDB that GizmoSQL v1.42.2
-# embeds. Run by hand on a tag; pushes start nothing, so the fork spends no runners.
+# embeds. Run by hand on a tag; pushes start nothing, so the fork spends no runners. It stays only until the release
+# pipeline (branching-release.yml) publishes its first v2.0.0-branching.ci.<n> release.
 #
 name: Main Extension Distribution Pipeline
 on:
@@ -17,19 +18,20 @@ jobs:
     outputs:
       duckdb_version: ${{ steps.version.outputs.duckdb_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           sparse-checkout: .github
       - id: version
-        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> $GITHUB_OUTPUT
+        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> "$GITHUB_OUTPUT"
 
   duckdb-next-build:
     name: Build extension binaries
     needs: get-duckdb-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
+    # Pinned to the commit of v2.0-cyanoptera that built v2.0.0-branching.2 (run 41163057883), not to the branch.
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@e38c2e18085bb960555ed74f1d9695de8e67b108
     with:
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
-      ci_tools_version: v2.0-cyanoptera
+      ci_tools_version: e38c2e18085bb960555ed74f1d9695de8e67b108
       # Temporary override; remove when extension-ci-tools updates its default.
       vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
       extension_name: ducklake
