@@ -1,0 +1,221 @@
+# name: test/sql/branch/ddl_alter.test
+# description: changing tables and views the branch created; the column ids hold across transactions and restarts
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_alter_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE base(i INTEGER)
+
+statement ok
+INSERT INTO base VALUES (1)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+CREATE TABLE m(id INTEGER, name VARCHAR, info STRUCT(a INTEGER))
+
+statement ok
+INSERT INTO m VALUES (1, 'one', {'a': 1}), (2, 'two', {'a': 2})
+
+# a column added after rows exist: those rows read its default
+statement ok
+ALTER TABLE m ADD COLUMN score INTEGER DEFAULT 5
+
+statement ok
+INSERT INTO m (id, name) VALUES (3, 'three')
+
+# a new default applies to new rows only
+statement ok
+ALTER TABLE m ALTER COLUMN score SET DEFAULT 9
+
+statement ok
+INSERT INTO m (id, name) VALUES (4, 'four')
+
+query II
+SELECT id, score FROM m ORDER BY id
+----
+1	5
+2	5
+3	5
+4	9
+
+statement ok
+ALTER TABLE m RENAME COLUMN name TO label
+
+statement ok
+ALTER TABLE m ALTER COLUMN label SET NOT NULL
+
+statement error
+INSERT INTO m (id) VALUES (5)
+----
+NOT NULL constraint failed
+
+statement ok
+ALTER TABLE m ALTER COLUMN label DROP NOT NULL
+
+statement ok
+INSERT INTO m (id) VALUES (5)
+
+statement ok
+ALTER TABLE m ALTER COLUMN score DROP DEFAULT
+
+statement ok
+INSERT INTO m (id, label) VALUES (6, 'six')
+
+statement ok
+COMMENT ON TABLE m IS 'the m table'
+
+statement ok
+COMMENT ON COLUMN m.label IS 'a label'
+
+statement ok
+CREATE VIEW mv AS SELECT id, label FROM m
+
+statement ok
+COMMENT ON VIEW mv IS 'a view'
+
+# several changes in one transaction
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE m ADD COLUMN extra INTEGER DEFAULT 1
+
+statement ok
+ALTER TABLE m RENAME COLUMN extra TO extra2
+
+statement ok
+INSERT INTO m (id, label) VALUES (7, 'seven')
+
+statement ok
+COMMENT ON COLUMN m.extra2 IS 'added in a transaction'
+
+statement ok
+COMMIT
+
+query IT
+SELECT column_id, column_name FROM ducklake_meta.ducklake_branching_column WHERE object_id = (SELECT object_id FROM ducklake_meta.ducklake_branching_object WHERE object_name = 'm') ORDER BY column_id
+----
+1	id
+2	label
+3	info
+4	a
+5	score
+6	extra2
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_alter_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH b
+
+query TTTT
+SELECT column_name, column_type, "null", "default" FROM (DESCRIBE m)
+----
+id	INTEGER	YES	NULL
+label	VARCHAR	YES	NULL
+info	STRUCT(a INTEGER)	YES	NULL
+score	INTEGER	YES	NULL
+extra2	INTEGER	YES	'1'
+
+query IIIII
+SELECT id, label, info, score, extra2 FROM m ORDER BY id
+----
+1	one	{'a': 1}	5	1
+2	two	{'a': 2}	5	1
+3	three	NULL	5	1
+4	four	NULL	9	1
+5	NULL	NULL	9	1
+6	six	NULL	NULL	1
+7	seven	NULL	NULL	1
+
+query T
+SELECT comment FROM duckdb_tables() WHERE database_name = 'ducklake' AND table_name = 'm'
+----
+the m table
+
+query T
+SELECT comment FROM duckdb_views() WHERE database_name = 'ducklake' AND view_name = 'mv'
+----
+a view
+
+query II
+FROM mv WHERE id = 1
+----
+1	one
+
+# a column added after a restart gets the next id, and the comments are kept when the table is written again
+statement ok
+ALTER TABLE m ADD COLUMN after_restart INTEGER
+
+query ITT
+SELECT column_id, column_name, comment FROM ducklake_meta.ducklake_branching_column WHERE object_id = (SELECT object_id FROM ducklake_meta.ducklake_branching_object WHERE object_name = 'm') AND parent_column IS NULL ORDER BY column_id
+----
+1	id	NULL
+2	label	a label
+3	info	NULL
+5	score	NULL
+6	extra2	added in a transaction
+7	after_restart	NULL
+
+query T
+SELECT comment FROM ducklake_meta.ducklake_branching_object WHERE object_name = 'm'
+----
+the m table
+
+# renaming a column the view reads breaks the view, as on main
+statement ok
+ALTER TABLE m RENAME COLUMN label TO label2
+
+statement error
+FROM mv
+----
+label
+
+# changing nothing commits nothing
+query I
+SELECT commit_count FROM ducklake_branches('ducklake')
+----
+19
+
+statement ok
+COMMENT ON TABLE m IS 'the m table'
+
+query I
+SELECT commit_count FROM ducklake_branches('ducklake')
+----
+19
+
+statement ok
+SET BRANCH main
+
+query I
+FROM base
+----
+1

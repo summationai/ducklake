@@ -1,0 +1,113 @@
+# name: test/sql/branch/ddl_prepared.test
+# description: prepared statements are bound again when the branch's catalog changes, and when they move to a branch
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_prepared_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2)
+
+# prepared on main
+statement ok
+PREPARE count_t AS SELECT COUNT(*) FROM t
+
+statement ok
+PREPARE star_t AS SELECT * FROM t ORDER BY ALL
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+statement ok
+CREATE TABLE x(a INTEGER)
+
+statement ok
+INSERT INTO x VALUES (10)
+
+# prepared on the branch, run after the branch's catalog changed
+statement ok
+PREPARE star_x AS SELECT * FROM x
+
+query I
+EXECUTE star_x
+----
+10
+
+statement ok
+ALTER TABLE x ADD COLUMN b INTEGER DEFAULT 20
+
+query II
+EXECUTE star_x
+----
+10	20
+
+statement ok
+ALTER TABLE t RENAME TO t_renamed
+
+statement error
+EXECUTE count_t
+----
+does not exist
+
+statement ok
+ALTER TABLE t_renamed RENAME TO t
+
+statement ok
+ALTER TABLE t RENAME TO t_again
+
+statement ok
+CREATE TABLE t(other VARCHAR, more VARCHAR)
+
+statement ok
+INSERT INTO t VALUES ('a', 'b')
+
+# the statement prepared on main reads the table that now has its name on the branch
+query II
+EXECUTE star_t
+----
+a	b
+
+statement ok
+DROP TABLE t
+
+statement error
+EXECUTE star_t
+----
+does not exist
+
+# and reads main's table again on main
+statement ok
+SET BRANCH main
+
+query I
+EXECUTE star_t
+----
+1
+2
+
+query I
+EXECUTE count_t
+----
+2
+
+statement error
+EXECUTE star_x
+----
+does not exist

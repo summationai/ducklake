@@ -1,0 +1,182 @@
+# name: test/sql/branch/branch_lifecycle.test
+# description: branch names, dropping a branch another connection is on, and re-attaching
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_lifecycle_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2), (3)
+
+statement error
+CREATE BRANCH main
+----
+is reserved
+
+statement error
+CREATE BRANCH MAIN
+----
+is reserved
+
+statement ok
+CREATE BRANCH "Quoted Name"
+
+statement error
+CREATE BRANCH "Quoted Name"
+----
+already exists
+
+statement error
+SET BRANCH missing
+----
+does not exist
+
+statement error
+DROP BRANCH missing
+----
+does not exist
+
+query II
+DROP BRANCH IF EXISTS missing
+----
+missing	false
+
+statement error
+CREATE BRANCH b FROM other
+----
+not supported yet
+
+statement error
+CREATE BRANCH
+----
+Expected a branch name
+
+statement error
+SET BRANCH b extra
+----
+Unexpected input
+
+# functions work like the statements
+query II
+CALL ducklake_create_branch('ducklake', 'b')
+----
+b	2
+
+# dropping a branch another connection is on sends that connection back to main once
+statement ok con1
+USE ducklake
+
+statement ok con1
+SET BRANCH b
+
+statement ok con1
+INSERT INTO t VALUES (100)
+
+query II
+DROP BRANCH b
+----
+b	true
+
+statement error con1
+SELECT SUM(i) FROM t
+----
+no longer exists
+
+query I con1
+FROM ducklake_current_branch('ducklake')
+----
+main
+
+query I con1
+SELECT SUM(i) FROM t
+----
+6
+
+# the name can be used again, for a new branch
+statement ok
+CREATE BRANCH b
+
+statement ok con1
+SET BRANCH b
+
+query I con1
+SELECT SUM(i) FROM t
+----
+6
+
+# the same happens in immediate transaction mode
+statement ok con2
+SET immediate_transaction_mode = true
+
+statement ok con2
+USE ducklake
+
+statement ok con2
+SET BRANCH b
+
+statement ok
+DROP BRANCH b
+
+statement error con2
+SELECT SUM(i) FROM t
+----
+no longer exists
+
+query I con2
+SELECT SUM(i) FROM t
+----
+6
+
+# a different lake attached under the same name starts on main
+statement ok
+CREATE BRANCH c
+
+statement ok
+SET BRANCH c
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}_other' AS ducklake (DATA_PATH '{DATA_PATH}/branch_lifecycle_other_files')
+
+query I
+FROM ducklake_current_branch('ducklake')
+----
+main
+
+# a lake without branch metadata has no branches until the first one is created
+query I
+SELECT COUNT(*) FROM ducklake_branches('ducklake')
+----
+0
+
+statement ok
+USE ducklake
+
+statement error
+SET BRANCH c
+----
+does not exist
+
+query II
+CREATE BRANCH c
+----
+c	0

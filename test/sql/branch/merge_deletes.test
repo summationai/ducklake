@@ -1,0 +1,310 @@
+# name: test/sql/branch/merge_deletes.test
+# description: merging branch deletes onto main files with and without main's own deletes
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_deletes_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t1(i INTEGER)
+
+statement ok
+INSERT INTO t1 SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE t2(i INTEGER)
+
+statement ok
+INSERT INTO t2 SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE t3(i INTEGER)
+
+statement ok
+INSERT INTO t3 SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE t4(i INTEGER)
+
+statement ok
+INSERT INTO t4 SELECT range FROM range(100)
+
+statement ok
+CREATE TABLE t5(i INTEGER)
+
+statement ok
+INSERT INTO t5 SELECT range FROM range(100)
+
+statement ok
+DELETE FROM t5 WHERE i < 12
+
+# main has a delete file on t1 and inlined file deletions on t2 when the branch forks
+statement ok
+DELETE FROM t1 WHERE i < 20
+
+statement ok
+DELETE FROM t2 WHERE i < 5
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET VARIABLE fork = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake'))
+
+statement ok
+SET BRANCH b
+
+statement ok
+DELETE FROM t1 WHERE i >= 20 AND i < 25
+
+statement ok
+DELETE FROM t2 WHERE i >= 5 AND i < 10
+
+statement ok
+DELETE FROM t3 WHERE i < 10
+
+# a file inserted on the branch and emptied again on the branch
+statement ok
+INSERT INTO t4 SELECT range FROM range(100, 110)
+
+statement ok
+DELETE FROM t4 WHERE i >= 100
+
+statement ok
+DELETE FROM t5 WHERE i >= 12 AND i < 24
+
+statement ok
+SET BRANCH main
+
+# main deletes again from the t5 file both sides deleted from; its rewritten delete file is back-dated to the
+# first delete, so the per-file conflict check does not see it and the merge takes the union
+statement ok
+DELETE FROM t5 WHERE i >= 24 AND i < 36
+
+statement ok
+SET VARIABLE main_second = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+statement ok
+MERGE BRANCH b
+
+statement ok
+SET VARIABLE merged = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+
+query I
+SELECT getvariable('merged') = getvariable('main_second') + 1
+----
+true
+
+# t1: one cumulative delete file; main's positions keep their snapshot, the branch's carry the merge snapshot
+query I
+SELECT COUNT(*) FROM t1
+----
+75
+
+query I
+SELECT COUNT(*) FROM t1 AT (VERSION => getvariable('fork'))
+----
+80
+
+query I
+SELECT COUNT(*) FROM t1 AT (VERSION => getvariable('fork') - 2)
+----
+100
+
+query III
+SELECT COUNT(*), MIN(begin_snapshot) = getvariable('fork') - 1, MAX(partial_max) = getvariable('merged') FROM ducklake_meta.ducklake_delete_file WHERE table_id = 1
+----
+1	true	true
+
+query I
+SELECT COUNT(*) FROM ducklake_table_deletions('ducklake', 'main', 't1', getvariable('merged'), getvariable('merged'))
+----
+5
+
+# t2: main's inlined deletions stay where they are; the branch's deletes become a plain delete file
+query I
+SELECT COUNT(*) FROM t2
+----
+90
+
+query I
+SELECT COUNT(*) FROM t2 AT (VERSION => getvariable('fork'))
+----
+95
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_inlined_delete_2
+----
+5
+
+query III
+SELECT COUNT(*), MAX(delete_count), MAX(partial_max) IS NULL FROM ducklake_meta.ducklake_delete_file WHERE table_id = 2
+----
+1	5	true
+
+# t3: main takes over the branch's own delete file
+query I
+SELECT COUNT(*) FROM t3
+----
+90
+
+query II
+SELECT COUNT(*), MAX(delete_count) FROM ducklake_meta.ducklake_delete_file WHERE table_id = 3
+----
+1	10
+
+# t4: the file the branch inserted and emptied is left out of main
+query I
+SELECT COUNT(*) FROM t4
+----
+100
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file WHERE table_id = 4
+----
+1
+
+# t5: both sides' deletes survive, each visible from its own snapshot
+query I
+SELECT COUNT(*) FROM t5
+----
+64
+
+query I
+SELECT COUNT(*) FROM t5 AT (VERSION => getvariable('fork'))
+----
+88
+
+query I
+SELECT COUNT(*) FROM t5 AT (VERSION => getvariable('main_second'))
+----
+76
+
+query II
+SELECT COUNT(*), MAX(delete_count) FROM ducklake_meta.ducklake_delete_file WHERE table_id = 5
+----
+1	36
+
+# scheduled: main's old t1 delete file and both of its t5 delete files, the branch's t1, t2 and t5 delete files,
+# the empty t4 file with its delete file
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+8
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query IIIII
+SELECT (SELECT COUNT(*) FROM t1), (SELECT COUNT(*) FROM t2), (SELECT COUNT(*) FROM t3), (SELECT COUNT(*) FROM t4), (SELECT COUNT(*) FROM t5)
+----
+75	90	90	100	64
+
+query I
+SELECT COUNT(*) FROM t1 AT (VERSION => getvariable('fork'))
+----
+80
+
+# main's later deletes, back-dated into its delete files, together with the branch's cover t6 completely and
+# repeat the branch's deletes on t7
+statement ok
+CREATE TABLE t6(i INTEGER)
+
+statement ok
+INSERT INTO t6 SELECT range FROM range(100)
+
+statement ok
+DELETE FROM t6 WHERE i < 50
+
+statement ok
+CREATE TABLE t7(i INTEGER)
+
+statement ok
+INSERT INTO t7 SELECT range FROM range(100)
+
+statement ok
+DELETE FROM t7 WHERE i < 20
+
+statement ok
+CREATE BRANCH b2
+
+statement ok
+SET VARIABLE fork2 = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'b2')
+
+statement ok
+SET BRANCH b2
+
+statement ok
+DELETE FROM t6 WHERE i >= 50 AND i < 89
+
+statement ok
+DELETE FROM t7 WHERE i >= 20 AND i < 40
+
+statement ok
+SET BRANCH main
+
+statement ok
+DELETE FROM t6 WHERE i >= 89
+
+statement ok
+DELETE FROM t7 WHERE i >= 20 AND i < 40
+
+statement ok
+MERGE BRANCH b2
+
+# t6: the merge drops the file; t7: the branch's deletes were all main's already
+query II
+SELECT (SELECT COUNT(*) FROM t6), (SELECT COUNT(*) FROM t7)
+----
+0	60
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_data_file WHERE table_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 't6') AND end_snapshot IS NULL
+----
+0
+
+query II
+SELECT (SELECT COUNT(*) FROM t6 AT (VERSION => getvariable('fork2'))), (SELECT COUNT(*) FROM t7 AT (VERSION => getvariable('fork2')))
+----
+50	80
+
+# the branch deletes one of main's inlined rows
+statement ok
+CREATE TABLE t8(i INTEGER)
+
+statement ok
+INSERT INTO t8 VALUES (1), (2), (3)
+
+statement ok
+CREATE BRANCH b3
+
+statement ok
+SET VARIABLE fork3 = (SELECT fork_snapshot_id FROM ducklake_branches('ducklake') WHERE branch_name = 'b3')
+
+statement ok
+SET BRANCH b3
+
+statement ok
+DELETE FROM t8 WHERE i = 2
+
+statement ok
+SET BRANCH main
+
+statement ok
+MERGE BRANCH b3
+
+query II
+SELECT (SELECT SUM(i) FROM t8), (SELECT SUM(i) FROM t8 AT (VERSION => getvariable('fork3')))
+----
+4	6

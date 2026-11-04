@@ -1,3 +1,4 @@
+#include "branching/ducklake_branching.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_catalog.hpp"
@@ -63,6 +64,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	string filter;
 	// we can never delete the most recent snapshot
 	filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
+	filter += DuckLakeBranching::ExpirableSnapshotFilter(DuckLakeTransaction::Get(context, ducklake_catalog));
 	if (has_timestamp) {
 		auto from_timestamp = older_than.GetValue<timestamp_tz_t>();
 		auto timestamp_filter = DuckLakeTableFunctionUtil::FormatTimestampISO8601(timestamp_t(from_timestamp.value));
@@ -75,6 +77,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 		filter += StringUtil::Format("snapshot_id IN (%s)", StringUtil::Join(snapshot_ids, ", "));
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Expiring snapshots");
 	auto &metadata_manager = transaction.GetMetadataManager();
 	result->snapshots = metadata_manager.GetAllSnapshots(filter);
 	for (auto &snapshot : result->snapshots) {
