@@ -1,0 +1,261 @@
+# name: test/sql/branch/branch_deletes.test
+# description: deletes on a branch against main's files, the branch's own files and main's later deletes
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_deletes_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(10)
+
+# main already has a delete file on the data file when the branch forks
+statement ok
+DELETE FROM t WHERE i = 0
+
+statement ok
+CREATE BRANCH b
+
+# main deletes more rows from the same file after the fork
+statement ok
+DELETE FROM t WHERE i = 1
+
+statement ok
+SET BRANCH b
+
+# the branch does not see main's later delete
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+9	45
+
+statement ok
+DELETE FROM t WHERE i = 2
+
+# main's delete from after the fork must not leak into the branch's delete file
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+8	43
+
+statement ok
+DELETE FROM t WHERE i = 3
+
+statement ok
+DELETE FROM t WHERE i = 4
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+6	36
+
+# the branch keeps a single delete file per main file
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_delete_file WHERE end_seq IS NULL
+----
+1
+
+# the superseded delete files are scheduled for deletion, like main's overwritten delete files
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904
+----
+2
+
+statement ok
+SET BRANCH main
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+statement ok
+SET BRANCH b
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+6	36
+
+statement ok
+SET BRANCH main
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+8	44
+
+# deleting every row of a file the branch wrote earlier keeps later row ids stable
+statement ok
+SET BRANCH b
+
+statement ok
+INSERT INTO t VALUES (100), (101)
+
+statement ok
+INSERT INTO t VALUES (200), (201)
+
+query II
+SELECT i, rowid FROM t WHERE i >= 100 ORDER BY i
+----
+100	1000000000000000000
+101	1000000000000000001
+200	1000000000000000002
+201	1000000000000000003
+
+statement ok
+DELETE FROM t WHERE i >= 100 AND i < 200
+
+query II
+SELECT i, rowid FROM t WHERE i >= 100 ORDER BY i
+----
+200	1000000000000000002
+201	1000000000000000003
+
+# a main file fully deleted on the branch
+statement ok
+DELETE FROM t WHERE i < 10
+
+query I
+SELECT i FROM t ORDER BY i
+----
+200
+201
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_dropped_file
+----
+1
+
+# the delete file the branch had on that main file went with it
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_delete_file WHERE target_data_file_id IS NOT NULL
+----
+0
+
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_deletes_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH b
+
+query II
+SELECT i, rowid FROM t ORDER BY i
+----
+200	1000000000000000002
+201	1000000000000000003
+
+statement ok
+SET BRANCH main
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+8	44
+
+# a commit that supersedes two earlier branch delete files at once, and two deletes on one file in a transaction
+statement ok
+CREATE TABLE u(i INTEGER)
+
+statement ok
+INSERT INTO u SELECT range FROM range(10)
+
+statement ok
+INSERT INTO u SELECT range FROM range(10, 20)
+
+statement ok
+CREATE BRANCH c
+
+statement ok
+SET BRANCH c
+
+statement ok
+DELETE FROM u WHERE i IN (0, 10)
+
+statement ok
+SET VARIABLE scheduled = (SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion)
+
+statement ok
+DELETE FROM u WHERE i IN (1, 11)
+
+query I
+SELECT COUNT(*) - getvariable('scheduled') FROM ducklake_meta.ducklake_files_scheduled_for_deletion
+----
+2
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM u WHERE i = 2
+
+statement ok
+DELETE FROM u WHERE i = 3
+
+statement ok
+COMMIT
+
+query II
+SELECT COUNT(*), SUM(i) FROM u
+----
+14	163
+
+statement ok
+SET BRANCH main
+
+query II
+SELECT COUNT(*), SUM(i) FROM u
+----
+20	190
+
+# a branch delete on a main file whose single main delete file carries no snapshot ids
+statement ok
+CREATE TABLE w(i INTEGER)
+
+statement ok
+INSERT INTO w SELECT range FROM range(10)
+
+statement ok
+DELETE FROM w WHERE i = 0
+
+statement ok
+CREATE BRANCH e
+
+statement ok
+SET BRANCH e
+
+statement ok
+DELETE FROM w WHERE i = 1
+
+query II
+SELECT COUNT(*), SUM(i) FROM w
+----
+8	44
+
+statement ok
+SET BRANCH main
+
+query II
+SELECT COUNT(*), SUM(i) FROM w
+----
+9	45

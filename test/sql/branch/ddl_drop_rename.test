@@ -1,0 +1,442 @@
+# name: test/sql/branch/ddl_drop_rename.test
+# description: dropping, renaming and replacing objects of main and of the branch, on a branch
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_drop_rename_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE keep(i INTEGER)
+
+statement ok
+INSERT INTO keep VALUES (1), (2)
+
+statement ok
+CREATE TABLE doomed(i INTEGER)
+
+statement ok
+INSERT INTO doomed VALUES (1), (2), (3)
+
+statement ok
+INSERT INTO doomed VALUES (4)
+
+statement ok
+CREATE TABLE renamed_main(i INTEGER)
+
+statement ok
+INSERT INTO renamed_main VALUES (10)
+
+statement ok
+CREATE TABLE replaced(i INTEGER)
+
+statement ok
+INSERT INTO replaced VALUES (100)
+
+statement ok
+CREATE VIEW keep_view AS SELECT i FROM keep
+
+statement ok
+CREATE VIEW doomed_view AS SELECT 1 AS one
+
+statement ok
+CREATE SCHEMA old_schema
+
+statement ok
+CREATE TABLE old_schema.inside(x INTEGER)
+
+statement ok
+INSERT INTO old_schema.inside VALUES (5)
+
+statement ok
+CREATE TABLE emptied(i INTEGER)
+
+statement ok
+INSERT INTO emptied VALUES (1)
+
+statement ok
+INSERT INTO emptied VALUES (2)
+
+statement ok
+CREATE BRANCH b
+
+statement ok
+SET BRANCH b
+
+# the branch writes to a main table in earlier commits, and once more in the commit that drops it
+statement ok
+INSERT INTO doomed VALUES (5)
+
+statement ok
+DELETE FROM doomed WHERE i = 1
+
+statement ok
+DELETE FROM doomed WHERE i = 4
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO doomed VALUES (6)
+
+statement ok
+DROP TABLE doomed
+
+statement ok
+COMMIT
+
+statement error
+SELECT * FROM doomed
+----
+does not exist
+
+# the branch keeps no rows for the dropped table, and its files are queued for deletion
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_data_file
+----
+0
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_delete_file
+----
+0
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_dropped_file
+----
+0
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE data_file_id >= 4611686018427387904
+----
+2
+
+# a main file emptied and its table dropped in one transaction
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM emptied WHERE i = 1
+
+statement ok
+DROP TABLE emptied
+
+statement ok
+COMMIT
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_dropped_file
+----
+0
+
+# a dropped name can be used again
+statement ok
+CREATE TABLE doomed(name VARCHAR)
+
+statement ok
+INSERT INTO doomed VALUES ('new')
+
+query T
+FROM doomed
+----
+new
+
+# renaming a table of main: its rows, and the branch's writes to it, follow the new name
+statement ok
+ALTER TABLE renamed_main RENAME TO renamed_twice
+
+statement ok
+INSERT INTO renamed_twice VALUES (11)
+
+statement ok
+ALTER TABLE renamed_twice RENAME TO renamed_branch
+
+query I
+SELECT i FROM renamed_branch ORDER BY i
+----
+10
+11
+
+statement error
+SELECT * FROM renamed_main
+----
+does not exist
+
+query TTT
+SELECT object_type, change_type, new_name FROM ducklake_meta.ducklake_branching_main_change ORDER BY main_id
+----
+table	dropped	NULL
+table	renamed	renamed_branch
+table	dropped	NULL
+
+# a table the branch created can take the old name
+statement ok
+CREATE TABLE renamed_main AS SELECT 'branch' AS origin
+
+query T
+FROM renamed_main
+----
+branch
+
+# renaming back to the name at the fork records no rename
+statement ok
+CREATE TABLE back_and_forth_marker(i INTEGER)
+
+statement ok
+ALTER TABLE keep RENAME TO keep_renamed
+
+statement ok
+ALTER TABLE keep_renamed RENAME TO keep
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_main_change WHERE change_type = 'renamed'
+----
+1
+
+query I
+SELECT SUM(i) FROM keep
+----
+3
+
+# renaming objects the branch created
+statement ok
+CREATE TABLE scratch AS SELECT 7 AS seven
+
+statement ok
+ALTER TABLE scratch RENAME TO scratch_renamed
+
+statement ok
+CREATE VIEW scratch_view AS SELECT seven FROM scratch_renamed
+
+statement ok
+ALTER VIEW scratch_view RENAME TO scratch_view_renamed
+
+query I
+FROM scratch_view_renamed
+----
+7
+
+statement error
+SELECT * FROM scratch
+----
+does not exist
+
+# renaming and dropping views of main
+statement ok
+ALTER VIEW keep_view RENAME TO keep_view_renamed
+
+query I
+SELECT SUM(i) FROM keep_view_renamed
+----
+3
+
+statement ok
+DROP VIEW doomed_view
+
+statement error
+SELECT * FROM doomed_view
+----
+does not exist
+
+# dropping a table and a view the branch created; the table's files are queued for deletion
+statement ok
+CREATE TABLE short_lived AS SELECT range AS r FROM range(5)
+
+statement ok
+CREATE VIEW short_lived_view AS SELECT 1
+
+statement ok
+DROP VIEW short_lived_view
+
+statement ok
+DROP TABLE short_lived
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_object WHERE object_name LIKE 'short_lived%'
+----
+0
+
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_files_scheduled_for_deletion WHERE path LIKE '%short_lived%'
+----
+1
+
+# CREATE OR REPLACE over a table of main and over a table of the branch
+statement ok
+CREATE OR REPLACE TABLE replaced AS SELECT 'replacement' AS v
+
+query T
+FROM replaced
+----
+replacement
+
+statement ok
+CREATE OR REPLACE TABLE renamed_main AS SELECT 'second' AS origin
+
+query T
+FROM renamed_main
+----
+second
+
+statement ok
+CREATE OR REPLACE VIEW keep_view_renamed AS SELECT 'replaced view' AS v
+
+query T
+FROM keep_view_renamed
+----
+replaced view
+
+# dropping a schema of main with its tables, and a schema the branch created with its tables
+statement ok
+DROP SCHEMA old_schema CASCADE
+
+statement error
+SELECT * FROM old_schema.inside
+----
+does not exist
+
+statement ok
+CREATE SCHEMA new_schema
+
+statement ok
+CREATE TABLE new_schema.inside AS SELECT 1 AS x
+
+statement error
+DROP SCHEMA new_schema
+----
+depend on it
+
+statement ok
+DROP SCHEMA new_schema CASCADE
+
+statement error
+SELECT * FROM new_schema.inside
+----
+does not exist
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	back_and_forth_marker
+main	doomed
+main	keep
+main	renamed_branch
+main	renamed_main
+main	replaced
+main	scratch_renamed
+
+query II
+SELECT schema_name, view_name FROM duckdb_views() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	keep_view_renamed
+main	scratch_view_renamed
+
+# a commit that only drops is a branch commit
+statement ok
+CREATE TABLE drop_only(i INTEGER)
+
+statement ok
+DROP TABLE drop_only
+
+query TT
+SELECT split_part(changes_made, ':', 1), commit_seq = (SELECT commit_count FROM ducklake_branches('ducklake')) FROM ducklake_meta.ducklake_branching_commit ORDER BY commit_seq DESC LIMIT 1
+----
+dropped_table	true
+
+# all of it survives a restart
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ddl_drop_rename_files', METADATA_CATALOG 'ducklake_meta')
+
+statement ok
+USE ducklake
+
+statement ok
+SET BRANCH b
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	back_and_forth_marker
+main	doomed
+main	keep
+main	renamed_branch
+main	renamed_main
+main	replaced
+main	scratch_renamed
+
+query II
+SELECT schema_name, view_name FROM duckdb_views() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	keep_view_renamed
+main	scratch_view_renamed
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main
+
+query I
+SELECT i FROM renamed_branch ORDER BY i
+----
+10
+11
+
+query T
+FROM keep_view_renamed
+----
+replaced view
+
+query T
+FROM replaced
+----
+replacement
+
+# main is untouched
+statement ok
+SET BRANCH main
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'ducklake' ORDER BY ALL
+----
+main	doomed
+main	emptied
+main	keep
+main	renamed_main
+main	replaced
+old_schema	inside
+
+query I
+SELECT SUM(i) FROM doomed
+----
+10
+
+query I
+FROM renamed_main
+----
+10
+
+query I
+FROM replaced
+----
+100
+
+query I
+FROM doomed_view
+----
+1

@@ -1,0 +1,131 @@
+# name: test/sql/branch/branch_concurrent.test
+# description: two connections committing to the same branch - the second commit fails
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_concurrent_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t SELECT range FROM range(10)
+
+statement ok
+CREATE BRANCH b1
+
+statement ok con1
+USE ducklake
+
+statement ok con2
+USE ducklake
+
+statement ok con1
+SET BRANCH b1
+
+statement ok con2
+SET BRANCH b1
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+INSERT INTO t VALUES (1)
+
+statement ok con2
+INSERT INTO t VALUES (2)
+
+statement ok con1
+COMMIT
+
+statement error con2
+COMMIT
+----
+was changed or dropped by another transaction
+
+query II con2
+SELECT COUNT(*), SUM(i) FROM t
+----
+11	46
+
+# main never saw any of it
+statement ok con2
+SET BRANCH main
+
+query II con2
+SELECT COUNT(*), SUM(i) FROM t
+----
+10	45
+
+# con1 keeps reading the branch head it started on while con2 commits
+statement ok con2
+SET BRANCH b1
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT COUNT(*), SUM(i) FROM t
+----
+11	46
+
+statement ok con2
+INSERT INTO t VALUES (10)
+
+query II con1
+SELECT COUNT(*), SUM(i) FROM t
+----
+11	46
+
+statement ok con1
+ROLLBACK
+
+query II con1
+SELECT COUNT(*), SUM(i) FROM t
+----
+12	56
+
+# dropping the branch while con1 has an open transaction on it fails con1's commit
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO t VALUES (200)
+
+query II con1
+SELECT COUNT(*), SUM(i) FROM t
+----
+13	256
+
+statement ok
+DROP BRANCH b1
+
+statement error con1
+COMMIT
+----
+was changed or dropped by another transaction
+
+# nothing of the failed commit was kept
+query I
+SELECT COUNT(*) FROM ducklake_meta.ducklake_branching_data_file
+----
+0
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+10	45

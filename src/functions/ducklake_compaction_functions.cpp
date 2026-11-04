@@ -1,4 +1,5 @@
 #include "duckdb/common/bind_helpers.hpp"
+#include "branching/ducklake_branching.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -301,6 +302,7 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 	// FIXME: pass in the sort_data so that list of files is approximately sorted in the same way
 	// (sorted by the min/max metadata)
 	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot, filter_options);
+	DuckLakeBranching::FilterCompactionCandidates(transaction, type, files);
 	auto files_compacted_in_transaction = transaction.GetCompactedFiles(table_id);
 
 	// Resolve, per schema_version (cached), whether a file written under it can be rewritten under the latest schema.
@@ -865,6 +867,7 @@ static unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableF
 	auto &ducklake_catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	ducklake_catalog.VerifyWritable();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	DuckLakeBranching::EnsureNotOnBranch(transaction, "Compaction");
 	uint64_t max_files = NumericLimits<uint64_t>::Maximum() - 1;
 	Value max_files_value;
 	if (DuckLakeTableFunctionUtil::TryGetNonNullOption(input, "max_compacted_files", "integer", max_files_value)) {
