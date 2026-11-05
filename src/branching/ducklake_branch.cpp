@@ -624,14 +624,9 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 	};
 	// catalog changes first: they give the tables the branch created their ids
 	auto definitions = WriteDefinitions(transaction, loaded, new_seq, next_file_id);
+	// a table dropped on the branch keeps none of the branch's files: this transaction's were removed by the DROP
+	// (DuckLakeTransaction::DropTable), the ones of earlier commits are ended below
 	auto context_ref = transaction.context.lock();
-	if (context_ref) {
-		for (auto &table_id : state.dropped_tables) {
-			// a main table dropped on the branch keeps none of the branch's files: this transaction's are removed,
-			// the ones of earlier commits are ended below
-			state.local_changes.CleanupFiles(*context_ref, table_id);
-		}
-	}
 
 	string data_rows, stats_rows, partition_rows, delete_rows, inlined_rows, dropped_rows;
 	set<TableIndex> inserted_tables, deleted_tables, inlined_deleted_tables;

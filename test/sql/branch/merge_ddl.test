@@ -180,7 +180,7 @@ SELECT map_keys(changes) FROM ducklake_snapshots('ducklake') ORDER BY snapshot_i
 [schemas_created, schemas_dropped, tables_created, views_created, tables_dropped, tables_altered, tables_inserted_into, views_dropped, views_altered]
 
 query T
-SELECT changes['tables_created'] FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
+SELECT list_sort(changes['tables_created']) FROM ducklake_snapshots('ducklake') ORDER BY snapshot_id DESC LIMIT 1
 ----
 [main.c, main.renamed_new, s.x]
 
