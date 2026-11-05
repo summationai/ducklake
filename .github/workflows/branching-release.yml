@@ -168,12 +168,14 @@ jobs:
           scripts/branching/release/upload.sh "$BUCKET" "$key" signed/ducklake.duckdb_extension.gz \
             "$GZIP_SHA256" "$SIGNED_SHA256" "$UNSIGNED_SHA256" >> "$GITHUB_OUTPUT"
           echo "build_key=$key" >> "$GITHUB_OUTPUT"
-      # the smoke test installs this exact file
+      # the smoke test makes its refused copies from this file. A rerun of this job replaces an earlier attempt's
+      # artifact (overwrite); upload.sh has already checked that the rerun's file is the object in build/.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ducklake-signed-linux_arm64
           path: signed/ducklake.duckdb_extension.gz
           if-no-files-found: error
+          overwrite: true
       # DXR-18: fails if any field is missing or malformed
       - name: Record the build
         env:
