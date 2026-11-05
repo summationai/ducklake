@@ -1,0 +1,3 @@
+# DXR-1: every change to develop needs a ducklake-admins approval; a merge to develop is KMS-signed and published to
+# canary/ (.github/workflows/branching-release.yml). Enforced by the develop ruleset's code-owner review.
+* @summationai/ducklake-admins
