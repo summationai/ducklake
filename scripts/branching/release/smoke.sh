@@ -54,7 +54,11 @@ PLATFORM=$(duck "$WORK/h0" <<< "PRAGMA platform;")
 # 1-2. install from the repository, then branch on a scratch catalog
 H=$WORK/h1
 echo "installing from $PREFIX"
+# INSTALL over https needs httpfs: it is installed from DuckDB's own (signed) repository before autoinstall is turned off
 got=$(duck "$H" 2>&1 << SQL
+INSTALL httpfs;
+LOAD httpfs;
+SELECT 'httpfs loaded from ' || installed_from FROM duckdb_extensions() WHERE extension_name = 'httpfs' AND loaded;
 SET autoinstall_known_extensions = false;
 SET allow_extension_repositories = 'allowed';
 CREATE EXTENSION REPOSITORY smoke WITH PREFIX '$PREFIX' USING PUBLIC KEY '$PUB';
@@ -87,12 +91,13 @@ SQL
 )
 # SET BRANCH echoes the branch name, and MERGE BRANCH its result row; only the labelled lines are checked
 expect "installs and loads from the repository, then creates, writes, merges and drops branches" \
-	"loaded, install mode REPOSITORY, allow_unsigned_extensions=false
+	"httpfs loaded from core
+loaded, install mode REPOSITORY, allow_unsigned_extensions=false
 branches before: 0
 main before merge: Boots=80,Jacket=100,Scarf=20
 main after merge: Boots=80,Hat=25,Jacket=110
 main after drop: Boots=80,Hat=25,Jacket=110
-branches after: 0" "$(grep -E '^(loaded|branches|main)[ ,]' <<< "$got" || echo "$got")"
+branches after: 0" "$(grep -E '^(httpfs|loaded|branches|main)[ ,]' <<< "$got" || echo "$got")"
 
 # 3. refusals, from a local repository that serves the bad copies under the same public key
 [ -f "$HASH" ] || fail "no composite hash script at $HASH (is the duckdb submodule checked out?)"
