@@ -2043,6 +2043,12 @@ void DuckLakeTransaction::DropTable(DuckLakeTableEntry &table) {
 
 	// The table exists before the transaction, drop the table anyway.
 	if (!IsTransactionLocal(table_id.index)) {
+		if (DuckLakeBranching::IsOnBranch(*this)) {
+			// a branch keeps none of this transaction's files of a table it drops. They are removed here, while the
+			// transaction is active: at commit an object store can't resolve its secret to remove them
+			auto context_ref = context.lock();
+			state->local_changes.CleanupFiles(*context_ref, table_id);
+		}
 		state->renamed_tables.erase(table_id);
 		state->dropped_tables.insert(table_id);
 	}
