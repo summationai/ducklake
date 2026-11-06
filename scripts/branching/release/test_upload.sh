@@ -66,13 +66,18 @@ ONE=$(sha256_of "$WORK/one.gz")
 TWO=$(sha256_of "$WORK/two.gz")
 KEY=build/0123/v2.0.0/linux_arm64/ducklake.duckdb_extension.gz
 upload() { # <key> <file> <gzip sha256>
-	bash "$HERE/upload.sh" bucket "$1" "$2" "$3" "$H" "$H" > "$WORK/out" 2> "$WORK/err"
+	bash "$HERE/upload.sh" bucket "$1" "$2" "$3" "$H" "$H" 0123456789abcdef0123456789abcdef01234567 > "$WORK/out" 2> "$WORK/err"
 }
 
 # 1. the first upload creates the object
 if upload "$KEY" "$WORK/one.gz" "$ONE" && grep -q '^version_id=[0-9a-f]\{32\}$' "$WORK/out"; then
 	first=$(cat "$WORK/out")
 	pass "the first upload creates the object (If-None-Match) and reports its version"
+	if grep -q '"commit": "0123456789abcdef0123456789abcdef01234567"' "$WORK/bucket/$(tr / % <<< "$KEY").json"; then
+		pass "the object's metadata records the commit (DXR-15 reads it)"
+	else
+		flunk "commit metadata: $(cat "$WORK/bucket/$(tr / % <<< "$KEY").json")"
+	fi
 else
 	flunk "first upload: $(cat "$WORK/err")"
 fi

@@ -5,14 +5,15 @@
 #
 #   scripts/branching/release/record.sh build  >> "$GITHUB_STEP_SUMMARY"
 #   scripts/branching/release/record.sh canary >> "$GITHUB_STEP_SUMMARY"
+#   scripts/branching/release/record.sh release >> "$GITHUB_STEP_SUMMARY"
 #
 # The fields come from the environment:
 #   both:   GITHUB_SHA, DUCKDB_VERSION, UNSIGNED_SHA256, SIGNED_SHA256, GZIP_SHA256, KEY_FINGERPRINT
 #   build:  GITHUB_REF, OBJECT (s3://bucket/key), OBJECT_VERSION
-#   canary: FROM, TO (s3://bucket/key), PREVIOUS_VERSION and PREVIOUS_SHA256 (`none` on a first publish), VERSION,
+#   canary, release: FROM, TO (s3://bucket/key), PREVIOUS_VERSION and PREVIOUS_SHA256 (`none` on a first publish), VERSION,
 #           APPROVED_BY, APPROVED_AT, PUBLISHED_AT (ISO 8601 UTC)
 set -uo pipefail
-KIND=${1:?usage: record.sh <build|canary>}
+KIND=${1:?usage: record.sh <build|canary|release>}
 errors=0
 bad() { echo "::error::record: $1" >&2; errors=$((errors + 1)); }
 value() { printf '%s' "${!1-}"; }
@@ -39,7 +40,7 @@ build)
 	need OBJECT '^s3://[^/]+/.+' "an s3:// object"
 	need OBJECT_VERSION "$ANY" "an object version"
 	;;
-canary)
+canary | release)
 	need FROM '^s3://[^/]+/.+' "an s3:// object"
 	need TO '^s3://[^/]+/.+' "an s3:// object"
 	need PREVIOUS_VERSION "$ANY" "an object version or none"
@@ -50,7 +51,7 @@ canary)
 	need PUBLISHED_AT "$TIME" "an ISO 8601 UTC time"
 	;;
 *)
-	echo "::error::record: unknown record '$KIND' (build or canary)" >&2
+	echo "::error::record: unknown record '$KIND' (build, canary or release)" >&2
 	exit 1
 	;;
 esac
@@ -61,7 +62,7 @@ row() { printf '| %s | %s%s%s |\n' "$1" "$BT" "$2" "$BT"; }
 if [ "$KIND" = build ]; then
 	echo "### Build"
 else
-	echo "### canary/"
+	echo "### $KIND/"
 fi
 echo "| | |"
 echo "|---|---|"

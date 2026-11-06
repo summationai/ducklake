@@ -146,6 +146,10 @@ jobs:
       run: |
         scripts/branching/release/test_record.sh
 
+    - name: Test newer.sh (DXR-15)
+      run: |
+        scripts/branching/release/test_newer.sh
+
   coverage:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Code coverage
