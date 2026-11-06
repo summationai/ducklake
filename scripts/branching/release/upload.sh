@@ -9,17 +9,21 @@
 # bucket) and reused if its SHA-256 and recorded digest are this file's. Anything else fails, as a second upload of
 # different bytes under the same commit must.
 #
-#   scripts/branching/release/upload.sh <bucket> <key> <file> <gzip sha256> <signed sha256> <unsigned sha256>
+#   scripts/branching/release/upload.sh <bucket> <key> <file> <gzip sha256> <signed sha256> <unsigned sha256> <commit>
+#
+# The object's metadata records the digests and the commit; release/ reads the commit to only move forward (DXR-15).
 #
 # Needs AWS_REGION. Logs go to stderr. On success it prints, for $GITHUB_OUTPUT: version_id.
 set -euo pipefail
-usage="usage: upload.sh <bucket> <key> <file> <gzip sha256> <signed sha256> <unsigned sha256>"
+usage="usage: upload.sh <bucket> <key> <file> <gzip sha256> <signed sha256> <unsigned sha256> <commit>"
 BUCKET=${1:?$usage}
 KEY=${2:?$usage}
 FILE=${3:?$usage}
 GZIP_SHA256=${4:?$usage}
 SIGNED_SHA256=${5:?$usage}
 UNSIGNED_SHA256=${6:?$usage}
+COMMIT=${7:?$usage}
+[[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || { echo "::error::upload: '$COMMIT' is not a commit SHA" >&2; exit 1; }
 : "${AWS_REGION:?upload.sh needs AWS_REGION}"
 
 log() { echo "$*" >&2; }
@@ -31,7 +35,7 @@ sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 log "creating s3://$BUCKET/$KEY"
 if out=$(aws s3api put-object --bucket "$BUCKET" --key "$KEY" --body "$FILE" \
 	--if-none-match '*' --checksum-algorithm SHA256 \
-	--metadata "gzip-sha256=$GZIP_SHA256,signed-sha256=$SIGNED_SHA256,unsigned-sha256=$UNSIGNED_SHA256" \
+	--metadata "gzip-sha256=$GZIP_SHA256,signed-sha256=$SIGNED_SHA256,unsigned-sha256=$UNSIGNED_SHA256,commit=$COMMIT" \
 	--output json 2>&1); then
 	version_id=$(jq -r '.VersionId' <<< "$out")
 	log "created s3://$BUCKET/$KEY, version $version_id"
