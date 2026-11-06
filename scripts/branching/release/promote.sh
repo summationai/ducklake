@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Publishes a build to a channel (canary/ or release/) without ever losing an update (spec: summationai/agent-cloud
-# docs/specs/ducklake-extension-release.md, DXR-12 and DXR-15; comment #6). The spec's ifGenerationMatch is S3's
-# conditional copy here:
+# Publishes a build to a channel (canary/ or release/) without ever losing an update (DXR-12 and DXR-15). The spec's
+# ifGenerationMatch is S3's conditional copy here:
 #   0. the build object must be the version the signing job uploaded, and its SHA-256 (S3's own checksum and the
 #      recorded digest) the build's; every copy names its ETag (x-amz-copy-source-if-match), so exactly those bytes
 #      are published and nothing unverified ever reaches the channel;
