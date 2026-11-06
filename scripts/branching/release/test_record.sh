@@ -50,6 +50,7 @@ check_kind() { # <kind> <VAR=value...>: the complete record, then each field lef
 }
 check_kind build "${build[@]}"
 check_kind canary "${canary[@]}"
+check_kind release "${canary[@]/canary\//release/}"
 
 if run build "${build[@]}" GZIP_SHA256=abc123 || ! grep -q "GZIP_SHA256 is 'abc123', not a SHA-256" err; then
 	flunk "a malformed digest passed"

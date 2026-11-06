@@ -1,12 +1,13 @@
 #
 # Builds the DuckLake branching extension for the DuckDB the GizmoSQL clusters run (linux_arm64 only), then signs,
-# uploads, smoke-tests and, after approval, publishes it to canary/ (spec: summationai/agent-cloud
-# docs/specs/ducklake-extension-release.md, DXR-8 to DXR-12, DXR-16, DXR-18).
+# uploads, smoke-tests and, after approval, publishes it to canary/; then, after a second approval, the same run copies
+# the same build to release/ (DXR-8 to DXR-18).
 #
-# A release to release/ is not part of this push pipeline: it runs on a v2.0.0-branching.ci.<n> tag, reuses the build
-# of the tag's commit and never rebuilds (DXR-13 to DXR-15), and comes in a later pull request.
+# A release is an approved develop run, identified by its commit: there is no release tag, and release/ never gets a
+# build that wasn't on canary/ first (DXR-13 to DXR-15). Whichever run is approved is copied, so approving (or
+# re-running) an older run's release job is how release/ is rolled back.
 #
-# The spec was written for GCS; the repository is S3 (summationai/code infra/gizmosql/extension-release). Where the
+# The spec was written for GCS; the repository is S3. Where the
 # spec says ifGenerationMatch this uses S3 conditional writes (If-None-Match / If-Match on the ETag), and DXR-18
 # records S3 version IDs instead of GCS generations.
 #
@@ -298,3 +299,68 @@ jobs:
           export APPROVED_BY APPROVED_AT PUBLISHED_AT
           FROM="s3://$BUCKET/$BUILD_KEY" TO="s3://$BUCKET/$CHANNEL_KEY" \
             scripts/branching/release/record.sh canary >> "$GITHUB_STEP_SUMMARY"
+
+  publish-release:
+    name: Publish to release/
+    needs: [duckdb-version, sign-and-upload, publish-canary]
+    runs-on: ubuntu-24.04
+    # DXR-13, DXR-15: after canary/, the same run waits for an approval by one of the release environment's required
+    # reviewers; only develop may deploy to it. Leaving it unapproved publishes nothing. It copies this run's own
+    # build/<sha>/ and never rebuilds (DXR-14).
+    environment: release
+    # one publication at a time; a newer pending run replaces an older pending one
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read # who approved this run, for DXR-18
+      id-token: write # DXR-10: the release/ writer
+    env:
+      DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
+      GZIP_SHA256: ${{ needs.sign-and-upload.outputs.gzip_sha256 }}
+      BUILD_KEY: ${{ needs.sign-and-upload.outputs.build_key }}
+      BUILD_VERSION: ${{ needs.sign-and-upload.outputs.build_version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          sparse-checkout: scripts/branching/release
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.REAL_RELEASE_WRITER_ROLE_ARN }}
+          role-session-name: ducklake-release-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          aws-region: ${{ env.AWS_REGION }}
+      # DXR-15: the same verified, conditional copy as canary/ (promote.sh)
+      - id: promote
+        name: Copy the build to release/
+        env:
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
+          PREFIX: ${{ vars.REAL_EXTENSION_PREFIX }}
+        run: |
+          [ -z "$PREFIX" ] || { echo "::error::REAL_EXTENSION_PREFIX is '$PREFIX', not empty"; exit 1; }
+          dst="${PREFIX}release/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
+          scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$BUILD_VERSION" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
+          echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
+      # DXR-18, as for canary/
+      - name: Record the publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
+          CHANNEL_KEY: ${{ steps.promote.outputs.channel_key }}
+          PREVIOUS_VERSION: ${{ steps.promote.outputs.previous_version }}
+          PREVIOUS_SHA256: ${{ steps.promote.outputs.previous_gzip_sha256 }}
+          VERSION: ${{ steps.promote.outputs.version }}
+          UNSIGNED_SHA256: ${{ needs.sign-and-upload.outputs.unsigned_sha256 }}
+          SIGNED_SHA256: ${{ needs.sign-and-upload.outputs.signed_sha256 }}
+          KEY_FINGERPRINT: ${{ needs.sign-and-upload.outputs.key_fingerprint }}
+        run: |
+          APPROVED_BY=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved" and any(.environments[]; .name == "release")) | .user.login] | unique | join(", ")')
+          APPROVED_AT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name == "Publish to release/") | .started_at')
+          PUBLISHED_AT=$(date -u +%FT%TZ)
+          export APPROVED_BY APPROVED_AT PUBLISHED_AT
+          FROM="s3://$BUCKET/$BUILD_KEY" TO="s3://$BUCKET/$CHANNEL_KEY" \
+            scripts/branching/release/record.sh release >> "$GITHUB_STEP_SUMMARY"
