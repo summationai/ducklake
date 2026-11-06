@@ -4,7 +4,8 @@
 # the same build to release/ (DXR-8 to DXR-18).
 #
 # A release is an approved develop run, identified by its commit: there is no release tag, and release/ never gets a
-# build that wasn't on canary/ first or that is older than the one it holds (DXR-13 to DXR-15).
+# build that wasn't on canary/ first (DXR-13 to DXR-15). Whichever run is approved is copied, so approving (or
+# re-running) an older run's release job is how release/ is rolled back.
 #
 # The spec was written for GCS; the repository is S3. Where the
 # spec says ifGenerationMatch this uses S3 conditional writes (If-None-Match / If-Match on the ETag), and DXR-18
@@ -166,7 +167,7 @@ jobs:
         run: |
           key="${PREFIX}build/$GITHUB_SHA/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
           scripts/branching/release/upload.sh "$BUCKET" "$key" signed/ducklake.duckdb_extension.gz \
-            "$GZIP_SHA256" "$SIGNED_SHA256" "$UNSIGNED_SHA256" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            "$GZIP_SHA256" "$SIGNED_SHA256" "$UNSIGNED_SHA256" >> "$GITHUB_OUTPUT"
           echo "build_key=$key" >> "$GITHUB_OUTPUT"
       # the smoke test makes its refused copies from this file. A rerun of this job replaces an earlier attempt's
       # artifact (overwrite); upload.sh has already checked that the rerun's file is the object in build/.
@@ -321,11 +322,9 @@ jobs:
       BUILD_KEY: ${{ needs.sign-and-upload.outputs.build_key }}
       BUILD_VERSION: ${{ needs.sign-and-upload.outputs.build_version }}
     steps:
-      # develop's whole history, for DXR-15's ancestor check
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           sparse-checkout: scripts/branching/release
-          fetch-depth: 0
           persist-credentials: false
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -333,33 +332,23 @@ jobs:
           role-session-name: ducklake-release-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 900
           aws-region: ${{ env.AWS_REGION }}
-      # DXR-15 step 4: release/ only moves forward along develop's history; an older run skips as superseded
-      - id: newer
-        name: Check release/ holds nothing newer
+      # DXR-15: the same verified, conditional copy as canary/ (promote.sh)
+      - id: promote
+        name: Copy the build to release/
         env:
           BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
           PREFIX: ${{ vars.REAL_EXTENSION_PREFIX }}
         run: |
           [ -z "$PREFIX" ] || { echo "::error::REAL_EXTENSION_PREFIX is '$PREFIX', not empty"; exit 1; }
           dst="${PREFIX}release/$DUCKDB_VERSION/linux_arm64/ducklake.duckdb_extension.gz"
-          scripts/branching/release/newer.sh "$BUCKET" "$dst" "$GITHUB_SHA" "$(git rev-parse origin/develop)" >> "$GITHUB_OUTPUT"
+          scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$BUILD_VERSION" "$dst" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
           echo "channel_key=$dst" >> "$GITHUB_OUTPUT"
-      # DXR-15 step 5: the same verified, conditional copy as canary/ (promote.sh)
-      - id: promote
-        name: Copy the build to release/
-        if: steps.newer.outputs.publish == 'true'
-        env:
-          BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
-          CHANNEL_KEY: ${{ steps.newer.outputs.channel_key }}
-        run: |
-          scripts/branching/release/promote.sh "$BUCKET" "$BUILD_KEY" "$BUILD_VERSION" "$CHANNEL_KEY" "$GZIP_SHA256" >> "$GITHUB_OUTPUT"
       # DXR-18, as for canary/
       - name: Record the publication
-        if: steps.newer.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BUCKET: ${{ vars.REAL_EXTENSION_BUCKET }}
-          CHANNEL_KEY: ${{ steps.newer.outputs.channel_key }}
+          CHANNEL_KEY: ${{ steps.promote.outputs.channel_key }}
           PREVIOUS_VERSION: ${{ steps.promote.outputs.previous_version }}
           PREVIOUS_SHA256: ${{ steps.promote.outputs.previous_gzip_sha256 }}
           VERSION: ${{ steps.promote.outputs.version }}
