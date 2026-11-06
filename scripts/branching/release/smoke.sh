@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-tests a signed DuckLake build the way a cluster loads it (spec: summationai/agent-cloud
-# docs/specs/ducklake-extension-release.md, DXR-16). It is not DLB-0 qualification.
+# Smoke-tests a signed DuckLake build the way a cluster loads it (DXR-16). It is not DLB-0 qualification.
 #
 #   scripts/branching/release/smoke.sh <repository prefix> <public_key.pem> <signed ducklake.duckdb_extension.gz>
 #

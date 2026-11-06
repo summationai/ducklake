@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Writes the DXR-18 record of a build or a publication as a markdown table, after checking that every field is there
-# and well formed (spec: summationai/agent-cloud docs/specs/ducklake-extension-release.md, DXR-18). A missing or
+# and well formed (DXR-18). A missing or
 # malformed field fails the step instead of leaving an empty cell in the record.
 #
 #   scripts/branching/release/record.sh build  >> "$GITHUB_STEP_SUMMARY"

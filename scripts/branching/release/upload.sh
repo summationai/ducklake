@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Uploads a signed build to build/<sha>/... once (spec: summationai/agent-cloud docs/specs/ducklake-extension-release.md,
-# DXR-11). The PutObject carries If-None-Match: * (the bucket policy refuses it without), so an object that is already
-# there is never replaced.
+# Uploads a signed build to build/<sha>/... once (DXR-11). The PutObject carries If-None-Match: * (the bucket policy
+# refuses it without), so an object that is already there is never replaced.
 #
 # A rerun of the signing job after S3 accepted the upload (a later step failed) finds the object there. The rerun
 # signs the same build artifact, and the KMS signature (PKCS1 v1.5) and gzip -n are deterministic, so its file is

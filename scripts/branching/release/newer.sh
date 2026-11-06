@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Decides whether a release run may publish to release/: release/ only moves forward along develop's history (spec:
-# summationai/code infra/gizmosql/extension-release/SPEC.md, DXR-15 step 4). Run right before the copy, after the
-# approval, from a checkout with develop's full history.
+# Decides whether a release run may publish to release/: release/ only moves forward along develop's history (DXR-15
+# step 4). Run right before the copy, after the approval, from a checkout with develop's full history.
 #   - release/ is empty: publish;
 #   - release/ holds this commit, or one of its ancestors: publish;
 #   - release/ holds a commit that is no longer in develop's history (a DXR-4 rebase): publish only if this run's commit

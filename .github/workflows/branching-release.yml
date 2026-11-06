@@ -1,12 +1,12 @@
 #
 # Builds the DuckLake branching extension for the DuckDB the GizmoSQL clusters run (linux_arm64 only), then signs,
 # uploads, smoke-tests and, after approval, publishes it to canary/; then, after a second approval, the same run copies
-# the same build to release/ (spec: summationai/code infra/gizmosql/extension-release/SPEC.md, DXR-8 to DXR-18).
+# the same build to release/ (DXR-8 to DXR-18).
 #
 # A release is an approved develop run, identified by its commit: there is no release tag, and release/ never gets a
 # build that wasn't on canary/ first or that is older than the one it holds (DXR-13 to DXR-15).
 #
-# The spec was written for GCS; the repository is S3 (summationai/code infra/gizmosql/extension-release). Where the
+# The spec was written for GCS; the repository is S3. Where the
 # spec says ifGenerationMatch this uses S3 conditional writes (If-None-Match / If-Match on the ETag), and DXR-18
 # records S3 version IDs instead of GCS generations.
 #
