@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Uploads a signed build to build/<sha>/... once (spec: summationai/agent-cloud docs/specs/ducklake-extension-release.md,
-# DXR-11). The PutObject carries If-None-Match: * (the bucket policy refuses it without), so an object that is already
-# there is never replaced.
+# Uploads a signed build to build/<sha>/... once (DXR-11). The PutObject carries If-None-Match: * (the bucket policy
+# refuses it without), so an object that is already there is never replaced.
 #
 # A rerun of the signing job after S3 accepted the upload (a later step failed) finds the object there. The rerun
 # signs the same build artifact, and the KMS signature (PKCS1 v1.5) and gzip -n are deterministic, so its file is
@@ -11,7 +10,7 @@
 #
 #   scripts/branching/release/upload.sh <bucket> <key> <file> <gzip sha256> <signed sha256> <unsigned sha256>
 #
-# Needs AWS_REGION. Logs go to stderr. On success it prints, for $GITHUB_OUTPUT: version_id.
+# Needs AWS_REGION. Logs go to stderr. On success it prints, for $GITHUB_OUTPUT: version_id, etag.
 set -euo pipefail
 usage="usage: upload.sh <bucket> <key> <file> <gzip sha256> <signed sha256> <unsigned sha256>"
 BUCKET=${1:?$usage}
@@ -34,8 +33,10 @@ if out=$(aws s3api put-object --bucket "$BUCKET" --key "$KEY" --body "$FILE" \
 	--metadata "gzip-sha256=$GZIP_SHA256,signed-sha256=$SIGNED_SHA256,unsigned-sha256=$UNSIGNED_SHA256" \
 	--output json 2>&1); then
 	version_id=$(jq -r '.VersionId' <<< "$out")
-	log "created s3://$BUCKET/$KEY, version $version_id"
+	etag=$(jq -r '.ETag' <<< "$out")
+	log "created s3://$BUCKET/$KEY, version $version_id, ETag $etag"
 	echo "version_id=$version_id"
+	echo "etag=$etag"
 	exit 0
 fi
 grep -q -E 'PreconditionFailed|\(412\)' <<< "$out" || fail "upload failed: $out"
@@ -52,10 +53,13 @@ header() { tr -d '\r' < "$work/headers" | awk -v n="$1" 'index(tolower($0), n ":
 existing_sha=$(sha256_of "$work/existing")
 recorded=$(header x-amz-meta-gzip-sha256)
 version_id=$(header x-amz-version-id)
+etag=$(header etag)
 if [ "$existing_sha" != "$GZIP_SHA256" ] || [ "$recorded" != "$GZIP_SHA256" ]; then
 	fail "s3://$BUCKET/$KEY already exists with SHA-256 $existing_sha (recorded ${recorded:-none}), not this build's" \
 		"$GZIP_SHA256; a build is uploaded once and never replaced (DXR-11)"
 fi
 [ -n "$version_id" ] || fail "s3://$BUCKET/$KEY has no version ID in $url's response"
+[ -n "$etag" ] || fail "s3://$BUCKET/$KEY has no ETag in $url's response"
 echo "::notice::s3://$BUCKET/$KEY was uploaded by an earlier attempt with these exact bytes; reusing version $version_id" >&2
 echo "version_id=$version_id"
+echo "etag=$etag"

@@ -33,8 +33,9 @@ if sys.argv[1] == "aws":
     version = uuid.uuid4().hex
     shutil.copy(opts["--body"], path(opts["--key"]))
     meta = dict(kv.split("=", 1) for kv in opts["--metadata"].split(","))
-    json.dump({"VersionId": version, "Metadata": meta}, open(path(opts["--key"]) + ".json", "w"))
-    print(json.dumps({"ETag": '"x"', "VersionId": version}))
+    etag = '"%s"' % uuid.uuid4().hex
+    json.dump({"VersionId": version, "ETag": etag, "Metadata": meta}, open(path(opts["--key"]) + ".json", "w"))
+    print(json.dumps({"ETag": etag, "VersionId": version}))
 else:  # curl -fsS --retry 3 -D <headers> -o <out> <url>
     args = sys.argv[2:]
     headers, out, url = args[args.index("-D") + 1], args[args.index("-o") + 1], args[-1]
@@ -47,6 +48,7 @@ else:  # curl -fsS --retry 3 -D <headers> -o <out> <url>
     with open(headers, "w") as f:
         f.write("HTTP/1.1 200 OK\r\n")
         f.write("X-Amz-Version-Id: %s\r\n" % info["VersionId"])
+        f.write("ETag: %s\r\n" % info["ETag"])
         for k, v in info["Metadata"].items(): f.write("x-amz-meta-%s: %s\r\n" % (k, v))
         f.write("\r\n")
 EOF
@@ -70,16 +72,17 @@ upload() { # <key> <file> <gzip sha256>
 }
 
 # 1. the first upload creates the object
-if upload "$KEY" "$WORK/one.gz" "$ONE" && grep -q '^version_id=[0-9a-f]\{32\}$' "$WORK/out"; then
+if upload "$KEY" "$WORK/one.gz" "$ONE" && grep -q '^version_id=[0-9a-f]\{32\}$' "$WORK/out" \
+	&& grep -q '^etag="[0-9a-f]\{32\}"$' "$WORK/out"; then
 	first=$(cat "$WORK/out")
-	pass "the first upload creates the object (If-None-Match) and reports its version"
+	pass "the first upload creates the object (If-None-Match) and reports its version and ETag"
 else
 	flunk "first upload: $(cat "$WORK/err")"
 fi
 
 # 2. a rerun with the same bytes reuses it and reports the same version
 if upload "$KEY" "$WORK/one.gz" "$ONE" && [ "$(cat "$WORK/out")" = "${first:-}" ] && grep -q 'reusing version' "$WORK/err"; then
-	pass "a rerun with the same bytes reuses the existing object and its version"
+	pass "a rerun with the same bytes reuses the existing object, its version and its ETag"
 else
 	flunk "rerun: $(cat "$WORK/out") $(cat "$WORK/err")"
 fi
