@@ -40,10 +40,14 @@ jobs:
       contents: read
     outputs:
       duckdb_version: ${{ steps.version.outputs.duckdb_version }}
+      upstream_base: ${{ steps.version.outputs.upstream_base }}
     steps:
+      # the whole history (no file contents beyond .github), for the merge base with the upstream release branch
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           sparse-checkout: .github
+          fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
       - id: version
         run: |
@@ -52,8 +56,12 @@ jobs:
             echo "::error::.github/duckdb-version holds '$version', not a DuckDB release such as v2.0.0"
             exit 1
           fi
-          echo "building $GITHUB_SHA ($GITHUB_REF) for DuckDB $version on linux_arm64"
+          # DXR-13, DXR-18: the pure-upstream release/<version> commit this build is based on
+          upstream_base=$(git merge-base HEAD "origin/release/$version") \
+            || { echo "::error::$GITHUB_SHA has no merge base with release/$version"; exit 1; }
+          echo "building $GITHUB_SHA ($GITHUB_REF, upstream base $upstream_base) for DuckDB $version on linux_arm64"
           echo "duckdb_version=$version" >> "$GITHUB_OUTPUT"
+          echo "upstream_base=$upstream_base" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build extension binaries
@@ -81,6 +89,7 @@ jobs:
       id-token: write # DXR-10: the signer role, kms:Sign with the DXR-9 key and the create-only build/ upload
     outputs:
       unsigned_sha256: ${{ steps.stamp.outputs.unsigned_sha256 }}
+      extension_version: ${{ steps.stamp.outputs.extension_version }}
       signed_sha256: ${{ steps.sign.outputs.signed_sha256 }}
       gzip_sha256: ${{ steps.sign.outputs.gzip_sha256 }}
       key_fingerprint: ${{ steps.sign.outputs.key_fingerprint }}
@@ -98,7 +107,8 @@ jobs:
         with:
           name: ducklake-${{ needs.duckdb-version.outputs.duckdb_version }}-extension-linux_arm64
           path: artifact
-      # DXR-8: the footer's metadata holds 32-byte fields; the 6th is the DuckDB version and the 7th the platform.
+      # DXR-8: the footer's metadata holds 32-byte fields; the 5th is the extension version, the 6th the DuckDB
+      # version and the 7th the platform.
       - id: stamp
         name: Check the build's stamp
         run: |
@@ -107,7 +117,8 @@ jobs:
           field() { tail -c 512 "$ext" | head -c 256 | tail -c +$((32 * $1 + 1)) | head -c 32 | tr -d '\0'; }
           stamped_version=$(field 5)
           stamped_platform=$(field 6)
-          echo "footer: DuckDB $stamped_version, platform $stamped_platform, extension version $(field 4)"
+          extension_version=$(field 4)
+          echo "footer: DuckDB $stamped_version, platform $stamped_platform, extension version $extension_version"
           if [ "$stamped_version" != "$DUCKDB_VERSION" ] || [ "$stamped_platform" != linux_arm64 ]; then
             echo "::error::the build is stamped $stamped_version/$stamped_platform, not $DUCKDB_VERSION/linux_arm64"
             exit 1
@@ -116,6 +127,7 @@ jobs:
           unsigned_sha256=$(head -c $((size - 256)) "$ext" | sha256sum | cut -d' ' -f1)
           echo "unsigned body: $((size - 256)) bytes, sha256 $unsigned_sha256"
           echo "unsigned_sha256=$unsigned_sha256" >> "$GITHUB_OUTPUT"
+          echo "extension_version=$extension_version" >> "$GITHUB_OUTPUT"
       - id: target
         name: Check the repository variables
         env:
@@ -187,6 +199,9 @@ jobs:
           KEY_FINGERPRINT: ${{ steps.sign.outputs.key_fingerprint }}
           BUILD_KEY: ${{ steps.upload.outputs.build_key }}
           OBJECT_VERSION: ${{ steps.upload.outputs.version_id }}
+          OBJECT_ETAG: ${{ steps.upload.outputs.etag }}
+          UPSTREAM_BASE: ${{ needs.duckdb-version.outputs.upstream_base }}
+          EXTENSION_VERSION: ${{ steps.stamp.outputs.extension_version }}
         run: |
           OBJECT="s3://$BUCKET/$BUILD_KEY" scripts/branching/release/record.sh build >> "$GITHUB_STEP_SUMMARY"
 
@@ -286,7 +301,11 @@ jobs:
           CHANNEL_KEY: ${{ steps.promote.outputs.channel_key }}
           PREVIOUS_VERSION: ${{ steps.promote.outputs.previous_version }}
           PREVIOUS_SHA256: ${{ steps.promote.outputs.previous_gzip_sha256 }}
+          PREVIOUS_ETAG: ${{ steps.promote.outputs.previous_etag }}
           VERSION: ${{ steps.promote.outputs.version }}
+          ETAG: ${{ steps.promote.outputs.etag }}
+          UPSTREAM_BASE: ${{ needs.duckdb-version.outputs.upstream_base }}
+          EXTENSION_VERSION: ${{ needs.sign-and-upload.outputs.extension_version }}
           UNSIGNED_SHA256: ${{ needs.sign-and-upload.outputs.unsigned_sha256 }}
           SIGNED_SHA256: ${{ needs.sign-and-upload.outputs.signed_sha256 }}
           KEY_FINGERPRINT: ${{ needs.sign-and-upload.outputs.key_fingerprint }}
@@ -351,7 +370,11 @@ jobs:
           CHANNEL_KEY: ${{ steps.promote.outputs.channel_key }}
           PREVIOUS_VERSION: ${{ steps.promote.outputs.previous_version }}
           PREVIOUS_SHA256: ${{ steps.promote.outputs.previous_gzip_sha256 }}
+          PREVIOUS_ETAG: ${{ steps.promote.outputs.previous_etag }}
           VERSION: ${{ steps.promote.outputs.version }}
+          ETAG: ${{ steps.promote.outputs.etag }}
+          UPSTREAM_BASE: ${{ needs.duckdb-version.outputs.upstream_base }}
+          EXTENSION_VERSION: ${{ needs.sign-and-upload.outputs.extension_version }}
           UNSIGNED_SHA256: ${{ needs.sign-and-upload.outputs.unsigned_sha256 }}
           SIGNED_SHA256: ${{ needs.sign-and-upload.outputs.signed_sha256 }}
           KEY_FINGERPRINT: ${{ needs.sign-and-upload.outputs.key_fingerprint }}
