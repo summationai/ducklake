@@ -1,7 +1,6 @@
 #
-# The checks a pull request into develop must pass before it merges (spec: summationai/agent-cloud
-# docs/specs/ducklake-extension-release.md, DXR-6 and DXR-7), and the coverage report that later pull requests compare
-# with:
+# The checks a pull request into develop must pass before it merges (DXR-6 and DXR-7), and the coverage report that
+# later pull requests compare with:
 #   - tests: DuckLake's SQL logic tests (make test_release) on linux_amd64, then the PostgreSQL catalog tests, because
 #     Nexus catalogs are PostgreSQL. DuckDB's tooling runs no tests on linux_arm64.
 #   - coverage: the same suites plus S3 on a clang coverage build. A pull request fails when it lowers the line coverage

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Publishes a build to a channel (canary/ or release/) without ever losing an update (spec: summationai/agent-cloud
-# docs/specs/ducklake-extension-release.md, DXR-12 and DXR-15; comment #6). The spec's ifGenerationMatch is S3's
-# conditional copy here:
+# Publishes a build to a channel (canary/ or release/) without ever losing an update (DXR-12 and DXR-15). The spec's
+# ifGenerationMatch is S3's conditional copy here:
 #   0. the build object must be the version the signing job uploaded, and its SHA-256 (S3's own checksum and the
 #      recorded digest) the build's; every copy names its ETag (x-amz-copy-source-if-match), so exactly those bytes
 #      are published and nothing unverified ever reaches the channel;
@@ -15,7 +14,8 @@
 #
 #   scripts/branching/release/promote.sh <bucket> <build key> <build version> <channel key> <expected gzip sha256>
 #
-# Logs go to stderr. On success it prints, for $GITHUB_OUTPUT: previous_version, previous_gzip_sha256, version, etag.
+# Logs go to stderr. On success it prints, for $GITHUB_OUTPUT: previous_version, previous_gzip_sha256, previous_etag,
+# version, etag (the previous fields are `none` on a first publish).
 set -euo pipefail
 usage="usage: promote.sh <bucket> <build key> <build version> <channel key> <expected gzip sha256>"
 BUCKET=${1:?$usage}
@@ -57,6 +57,7 @@ copy() {
 
 previous_version=none
 previous_sha=none
+previous_etag=none
 log "publishing s3://$BUCKET/$SRC to s3://$BUCKET/$DST"
 if out=$(copy --if-none-match '*'); then
 	log "first publish to $DST (it held nothing)"
@@ -68,11 +69,12 @@ else
 	current=$(aws s3api head-object --bucket "$BUCKET" --key "$DST" --checksum-mode ENABLED --output json 2>&1) \
 		|| fail "$DST exists but can't be read: $current"
 	etag=$(jq -r '.ETag' <<< "$current")
+	previous_etag=$etag
 	previous_version=$(jq -r '.VersionId // "none"' <<< "$current")
 	previous_sha=$(jq -r '.Metadata["gzip-sha256"] // "none"' <<< "$current")
 	if holds_build "$current"; then
 		log "$DST already holds this build (version $previous_version, SHA-256 $EXPECTED); nothing to copy"
-		jq -r '"previous_version=\(.VersionId // "none")\nprevious_gzip_sha256=\(.Metadata["gzip-sha256"] // "none")\nversion=\(.VersionId // "none")\netag=\(.ETag)"' <<< "$current"
+		jq -r '"previous_version=\(.VersionId // "none")\nprevious_gzip_sha256=\(.Metadata["gzip-sha256"] // "none")\nprevious_etag=\(.ETag)\nversion=\(.VersionId // "none")\netag=\(.ETag)"' <<< "$current"
 		exit 0
 	fi
 	if [ "$previous_sha" = "$EXPECTED" ]; then
@@ -99,5 +101,5 @@ current_version=$(jq -r '.VersionId // "none"' <<< "$new")
 holds_build "$new" || fail "$DST version $version has SHA-256 $(jq -r '.ChecksumSHA256 // "none"' <<< "$new") \
 (recorded $(jq -r '.Metadata["gzip-sha256"] // "none"' <<< "$new")), not the build's $EXPECTED"
 log "published $DST version $version, SHA-256 $EXPECTED"
-printf 'previous_version=%s\nprevious_gzip_sha256=%s\nversion=%s\netag=%s\n' \
-	"$previous_version" "$previous_sha" "$version" "$(jq -r '.ETag' <<< "$new")"
+printf 'previous_version=%s\nprevious_gzip_sha256=%s\nprevious_etag=%s\nversion=%s\netag=%s\n' \
+	"$previous_version" "$previous_sha" "$previous_etag" "$version" "$(jq -r '.ETag' <<< "$new")"

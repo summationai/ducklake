@@ -94,15 +94,18 @@ D=$(printf d%.0s {1..64})
 seed test/build/ddd/x.gz "$D"
 
 # 1. the first publish to an empty channel works
-if promote test/build/aaa/x.gz "$A" && grep -q '^previous_version=none$' "$WORK/out" && [ "$(versions "$DST")" = 1 ]; then
-	pass "the first publish to an empty channel works (If-None-Match)"
+if promote test/build/aaa/x.gz "$A" && grep -q '^previous_version=none$' "$WORK/out" \
+	&& grep -q '^previous_etag=none$' "$WORK/out" && [ "$(versions "$DST")" = 1 ]; then
+	first_etag=$(sed -n 's/^etag=//p' "$WORK/out")
+	pass "the first publish to an empty channel works (If-None-Match); there is no previous ETag"
 else
 	flunk "first publish: $(cat "$WORK/err")"
 fi
 
 # 2. a newer build replaces it through If-Match, and the previous version is reported
-if promote test/build/bbb/x.gz "$B" && grep -q "^previous_gzip_sha256=$A\$" "$WORK/out" && [ "$(versions "$DST")" = 2 ]; then
-	pass "a newer build replaces it (If-Match on the current ETag); the previous version is kept and reported"
+if promote test/build/bbb/x.gz "$B" && grep -q "^previous_gzip_sha256=$A\$" "$WORK/out" && [ "$(versions "$DST")" = 2 ] \
+	&& [ -n "${first_etag:-}" ] && grep -qxF "previous_etag=$first_etag" "$WORK/out" && ! grep -qxF "etag=$first_etag" "$WORK/out"; then
+	pass "a newer build replaces it (If-Match on the current ETag); the previous version and ETag are kept and reported"
 else
 	flunk "replace: $(cat "$WORK/err")"
 fi

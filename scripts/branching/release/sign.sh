@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Signs a DuckDB extension with a KMS key, in the format DuckDB signs its own extensions (spec: summationai/agent-cloud
-# docs/specs/ducklake-extension-release.md, DXR-9): the last 256 bytes of the file hold an RSA-SHA256 signature of the
-# composite hash of everything before them (duckdb/scripts/compute-extension-hash.sh). KMS signs that hash as a DIGEST,
-# so the private key never leaves KMS.
+# Signs a DuckDB extension with a KMS key, in the format DuckDB signs its own extensions (DXR-9): the last 256 bytes of
+# the file hold an RSA-SHA256 signature of the composite hash of everything before them
+# (duckdb/scripts/compute-extension-hash.sh). KMS signs that hash as a DIGEST, so the private key never leaves KMS.
 #
 #   scripts/branching/release/sign.sh <built extension> <public_key.pem> <signed output>
 #
