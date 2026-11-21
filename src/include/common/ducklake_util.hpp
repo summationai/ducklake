@@ -31,8 +31,8 @@ class Expression;
 class LogicalType;
 
 struct ParsedCatalogEntry {
-	vector<string> schema_path;
-	string name;
+	vector<Identifier> schema_path;
+	Identifier name;
 
 	string SchemaKey() const;
 };
@@ -42,8 +42,9 @@ public:
 	//! File systems allow at most 255 bytes in a file name
 	static constexpr idx_t MAX_FILE_NAME_LENGTH = 255;
 
-	//! Extracts the value of a literal, or of a cast over a literal, as written in a DEFAULT or parameter default
-	static bool TryGetLiteralValue(const ParsedExpression &expr, Value &result);
+	//! The value of a literal or of a cast over one, a cast of a time zone type needs the context
+	static bool TryGetLiteralValue(const ParsedExpression &expr, Value &result,
+	                               optional_ptr<ClientContext> context = nullptr);
 	//! Casts stored text to a type when the value prints as the same text
 	static bool TryReadTextAs(const Value &text, const LogicalType &type, Value &result);
 	//! The expression of a literal default stored as text, for a column of the given type
@@ -51,7 +52,7 @@ public:
 	//! Extracts a macro parameter default that can be stored as a literal of its DuckLake type
 	static bool TryGetMacroDefaultLiteral(const ParsedExpression &expr, Value &result);
 	static string ParseQuotedValue(const string &input, idx_t &pos);
-	static string ToQuotedList(const vector<string> &input, char list_separator = ',');
+	static string ToQuotedList(const vector<Identifier> &input, char list_separator = ',');
 	static vector<string> ParseQuotedList(const string &input, char list_separator = ',');
 	static string StatsToString(const string &text);
 	static string ValueToSQL(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val);
@@ -79,7 +80,7 @@ public:
 	static string ReplacePlaceholders(const string &sql, const vector<pair<string, string>> &replacements);
 
 	//! Returns true if the given column name conflicts with inlined data system columns
-	static bool IsInlinedSystemColumn(const string &name, bool prefixed_inlined_columns);
+	static bool IsInlinedSystemColumn(const Identifier &name, bool prefixed_inlined_columns);
 
 	static string OptionalIdxOrNull(const optional_idx &v);
 
@@ -93,20 +94,18 @@ public:
 
 	//! Throws if a column name is reserved for inlined data metadata on this catalog
 	static void ValidateInlinedSystemColumn(DuckLakeCatalog &catalog, ClientContext &context, SchemaIndex schema_id,
-	                                        TableIndex table_id, const string &name,
+	                                        TableIndex table_id, const Identifier &name,
 	                                        optional_ptr<const map<string, string>> table_options = nullptr);
 	static void ValidateNoInlinedSystemColumns(DuckLakeCatalog &catalog, ClientContext &context, SchemaIndex schema_id,
 	                                           const ColumnList &columns,
 	                                           optional_ptr<const map<string, string>> table_options = nullptr);
 	//! Throws if a column conflicts with inlined data metadata columns when enabling inlining
 	static void ValidateCanEnableInlining(const ColumnList &columns, bool prefixed_inlined_columns,
-	                                      const string &table_name);
+	                                      const Identifier &table_name);
 
 	//! Copy extension-registered settings from one context onto another. Core engine settings
 	//! are not copied, and settings that change the types read are turned off.
 	static void CopyExtensionSettings(ClientContext &from, ClientContext &to);
-	//! Sets a session extension setting without checking the configuration lock
-	static void SetExtensionSetting(ClientContext &context, const string &name, const Value &value);
 
 	static string ParseConfigOptionValue(ClientContext &context, const string &option, const Value &val);
 	static void ValidateConfigOptionScope(const string &option, bool has_schema, bool has_table);

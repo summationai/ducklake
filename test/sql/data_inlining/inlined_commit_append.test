@@ -6,9 +6,14 @@ require ducklake
 
 require parquet
 
+require icu
+
 test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 
 test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET TimeZone = 'UTC'
 
 statement ok
 ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/inlined_commit_append', DATA_INLINING_ROW_LIMIT 100000)
@@ -26,6 +31,13 @@ INSERT INTO ducklake.t SELECT i, i::INTEGER, i / 7, i / 3, DATE '2000-01-01' + (
 # the metadata queries of the commit do not hold the rows
 query I
 SELECT sum(length(query)) < 65536 FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true
+
+# the inlined rows are inserted by one logged statement that describes them without their values
+query I
+SELECT query LIKE 'INSERT INTO %ducklake_inlined_data_% SELECT col9, %, NULL, col1, % FROM inlined_data /* 10000 rows */'
+FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%FROM inlined_data%'
 ----
 true
 

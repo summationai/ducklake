@@ -1,6 +1,6 @@
 {
   "description": "Run DuckLake tests using Postgres as a catalog DBMS.",
-  "on_init": "ATTACH 'dbname=ducklakedb' AS pg (TYPE postgres); USE pg; DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS metadata_s1 CASCADE; DROP SCHEMA IF EXISTS metadata_s2 CASCADE; DROP SCHEMA IF EXISTS junk_1064 CASCADE; DROP SCHEMA IF EXISTS scoped_meta_1064 CASCADE; DROP SCHEMA IF EXISTS read_only_new_lake CASCADE; DROP SCHEMA IF EXISTS read_only_v10_lake CASCADE; CREATE SCHEMA public;USE memory; DETACH pg;",
+  "on_init": "ATTACH 'dbname=ducklakedb' AS pg (TYPE postgres); DROP SCHEMA pg.public CASCADE; DROP SCHEMA IF EXISTS pg.metadata_s1 CASCADE; DROP SCHEMA IF EXISTS pg.metadata_s2 CASCADE; DROP SCHEMA IF EXISTS pg.junk_1064 CASCADE; DROP SCHEMA IF EXISTS pg.scoped_meta_1064 CASCADE; DROP SCHEMA IF EXISTS pg.read_only_new_lake CASCADE; DROP SCHEMA IF EXISTS pg.read_only_v10_lake CASCADE; CREATE SCHEMA pg.public; DETACH pg;",
   "autoloading": "none",
   "statically_loaded_extensions": [
     "core_functions",
@@ -72,13 +72,6 @@
       ]
     },
     {
-      "reason": "on_init ends with USE memory, which a DuckLake opened as the main database does not have",
-      "paths": [
-        "test/sql/attach/ducklake_main_database.test",
-        "test/sql/attach/ducklake_main_database_reopen.test"
-      ]
-    },
-    {
       "reason": "Test only for SQLite as catalog",
       "paths": [
         "test/sql/metadata/ducklake_settings_sqlite.test",
@@ -113,12 +106,6 @@
       "reason": "Metadata reads run under REPEATABLE READ, so an open transaction never observes a later merge or flush; the partial-file count guard is unreachable and count(*) legitimately folds from metadata",
       "paths": [
         "test/sql/quack/partial_file_count.test"
-      ]
-    },
-    {
-      "reason": "The commit batch of a Postgres catalog is not logged through DuckLakeMetadata, so the number of column inserts cannot be counted",
-      "paths": [
-        "test/sql/issues/issue_1146_column_insert_batches.test"
       ]
     }
   ]

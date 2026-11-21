@@ -73,7 +73,7 @@ vector<string> DuckLakePartitionUtils::GetPartitionKeyNames(const DuckLakePartit
 		if (!field_id) {
 			throw InternalException("DuckLake partition field id not found");
 		}
-		result.push_back(GetPartitionKeyName(field.transform.type, field_id->Name(), used_names));
+		result.push_back(GetPartitionKeyName(field.transform.type, field_id->Name().GetIdentifierName(), used_names));
 		used_names.insert(result.back());
 	}
 	return result;
@@ -200,7 +200,7 @@ unique_ptr<Expression> DuckLakePartitionUtils::CreatePartitionPathExpression(Cli
 	for (idx_t i = 0; i < copy.partition_columns.size(); i++) {
 		auto col_idx = copy.partition_columns[i];
 		vector<unique_ptr<Expression>> children;
-		children.push_back(make_uniq<BoundConstantExpression>(Value(copy.names[col_idx].GetIdentifierName())));
+		children.push_back(make_uniq<BoundConstantExpression>(Value(copy.names[col_idx])));
 		children.push_back(make_uniq<BoundReferenceExpression>(copy.expected_types[col_idx], i));
 		auto component = binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("hive_partition_component"),
 		                                           std::move(children));
@@ -284,17 +284,21 @@ static unique_ptr<Expression> FloorNanosToMicros(ClientContext &context, unique_
 		return make_uniq<BoundConstantExpression>(Value::BIGINT(val));
 	};
 	auto nanos = DuckLakePartitionUtils::ApplyScalarFunction(context, "epoch_ns", std::move(column_expr));
-	auto nanos_copy = nanos->Copy();
-	auto remainder = BindBinaryOp(context, "%", std::move(nanos_copy), bigint_const(1000));
-	auto shifted = BindBinaryOp(context, "+", std::move(remainder), bigint_const(1000));
-	auto nonneg_remainder = BindBinaryOp(context, "%", std::move(shifted), bigint_const(1000));
-	auto floored = BindBinaryOp(context, "-", std::move(nanos), std::move(nonneg_remainder));
-	auto micros = BindBinaryOp(context, "//", std::move(floored), bigint_const(1000));
-	return DuckLakePartitionUtils::ApplyScalarFunction(context, "make_timestamp", std::move(micros));
+	auto remainder = BindBinaryOp(context, "%", nanos->Copy(), bigint_const(1000));
+	auto negative_remainder =
+	    BoundComparisonExpression::Create(ExpressionType::COMPARE_LESSTHAN, std::move(remainder), bigint_const(0));
+	auto correction = make_uniq<BoundCaseExpression>(std::move(negative_remainder), bigint_const(1), bigint_const(0));
+	// divide before correcting the quotient to avoid overflow near INT64_MIN
+	auto micros = BindBinaryOp(context, "//", std::move(nanos), bigint_const(1000));
+	auto floored = BindBinaryOp(context, "-", std::move(micros), std::move(correction));
+	return DuckLakePartitionUtils::ApplyScalarFunction(context, "make_timestamp", std::move(floored));
 }
 
 //! A TIMESTAMPTZ as the timestamp of its UTC instant, so its transforms do not depend on the session TimeZone
 static unique_ptr<Expression> TimestampTZToUTC(ClientContext &context, unique_ptr<Expression> column_expr) {
+	if (column_expr->GetReturnType().id() == LogicalTypeId::TIMESTAMP_TZ_NS) {
+		return FloorNanosToMicros(context, std::move(column_expr));
+	}
 	if (column_expr->GetReturnType().id() != LogicalTypeId::TIMESTAMP_TZ) {
 		return column_expr;
 	}
@@ -305,7 +309,7 @@ static unique_ptr<Expression> TimestampTZToUTC(ClientContext &context, unique_pt
 static unique_ptr<Expression> ApplyEpochTransform(ClientContext &context, unique_ptr<Expression> column_expr,
                                                   DuckLakeTransformType transform_type) {
 	auto source_id = column_expr->GetReturnType().id();
-	if (source_id == LogicalTypeId::TIMESTAMP_NS || source_id == LogicalTypeId::TIMESTAMP_TZ_NS) {
+	if (source_id == LogicalTypeId::TIMESTAMP_NS) {
 		// the implicit cast to microseconds rounds, Iceberg requires flooring
 		column_expr = FloorNanosToMicros(context, std::move(column_expr));
 	} else {
@@ -327,7 +331,7 @@ static bool EpochTransformSupportsType(const LogicalType &type) {
 }
 
 void DuckLakePartitionUtils::VerifyTransformSupportsType(ClientContext &context, const DuckLakePartitionField &field,
-                                                         const string &column_name, const LogicalType &type) {
+                                                         const Identifier &column_name, const LogicalType &type) {
 	bool supported = !IsEpochTransform(field.transform.type) || EpochTransformSupportsType(type);
 	if (supported) {
 		try {
@@ -342,7 +346,7 @@ void DuckLakePartitionUtils::VerifyTransformSupportsType(ClientContext &context,
 	}
 	if (!supported) {
 		throw InvalidInputException("Cannot partition by %s(%s) - the transform does not support columns of type %s",
-		                            GetTransformName(field.transform.type), column_name, type);
+		                            GetTransformName(field.transform.type), SQLIdentifier(column_name), type);
 	}
 }
 

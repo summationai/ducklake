@@ -80,9 +80,9 @@ void DuckLakeInitializer::Initialize() {
 	// the metadata database would truncate a longer name, and the catalog is then not found under its name
 	auto max_name_length = transaction.GetMetadataManager().MaxIdentifierLength();
 	if (options.metadata_schema.GetIdentifierName().size() > max_name_length) {
-		throw InvalidInputException("METADATA_SCHEMA \"%s\" is longer than the %d bytes that the metadata database "
+		throw InvalidInputException("METADATA_SCHEMA %s is longer than the %d bytes that the metadata database "
 		                            "allows for a name",
-		                            options.metadata_schema.GetIdentifierName(), max_name_length);
+		                            options.metadata_schema, max_name_length);
 	}
 	// after the metadata database is attached initialize the ducklake
 	// check if we are loading an existing DuckLake or creating a new one
@@ -144,7 +144,8 @@ void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &t
 			return;
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
-			if (PermanentLoadError(error)) {
+			// another attach migrating at the same time can make a migration fail with any error
+			if (PermanentLoadError(error) && !migrating) {
 				error.Throw();
 			}
 			if (attempt == 0) {
@@ -218,8 +219,7 @@ void DuckLakeInitializer::InitializeNewDuckLake(DuckLakeTransaction &transaction
 		version = DUCKLAKE_LATEST_VERSION;
 	}
 	if (options.data_path.empty()) {
-		auto &metadata_catalog =
-		    Catalog::GetCatalog(*transaction.GetConnection().context, Identifier(options.metadata_database));
+		auto &metadata_catalog = Catalog::GetCatalog(*transaction.GetConnection().context, options.metadata_database);
 		if (!metadata_catalog.IsDuckCatalog()) {
 			throw InvalidInputException(
 			    "Attempting to create a new ducklake instance but data_path is not set - set the "
@@ -240,6 +240,7 @@ void DuckLakeInitializer::InitializeNewDuckLake(DuckLakeTransaction &transaction
 }
 
 void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction) {
+	migrating = false;
 	// load the data path from the existing duck lake
 	auto &metadata_manager = transaction.GetMetadataManager();
 	auto metadata = metadata_manager.LoadDuckLake();
@@ -264,6 +265,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 			if (catalog_version < target_version) {
 				catalog.VerifyWritable();
 			}
+			migrating = catalog_version < target_version;
 			if (catalog_version == DuckLakeVersion::V0_1) {
 				metadata_manager.MigrateV01();
 				catalog_version = DuckLakeVersion::V0_2;
@@ -289,6 +291,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				catalog_version = DuckLakeVersion::V1_0;
 			}
 			if (catalog_version >= target_version) {
+				migrating = false;
 				resolved_version = catalog_version;
 				continue;
 			}
@@ -296,6 +299,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				metadata_manager.MigrateV10(catalog_version == DuckLakeVersion::V1_1_DEV_1);
 				catalog_version = DuckLakeVersion::V1_1;
 			}
+			migrating = false;
 			if (catalog_version != target_version) {
 				// LCOV_EXCL_START
 				throw NotImplementedException("Unsupported DuckLake version '%s'",
