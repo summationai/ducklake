@@ -579,7 +579,7 @@ void DuckLakeBranchManager::LoadBranch(DuckLakeTransaction &transaction, const D
 	}
 	for (auto &table_entry : loaded.inlined_deletes) {
 		for (auto &entry : table_entry.second) {
-			local_changes.AddNewInlinedDeletes(table_entry.first, entry.first, entry.second);
+			local_changes.AddNewInlinedDeletes(table_entry.first, Identifier(entry.first), entry.second);
 		}
 	}
 }
@@ -702,7 +702,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 			}
 		}
 		for (auto &inlined_entry : changes.new_inlined_data_deletes) {
-			auto &loaded_rows = loaded.inlined_deletes[table_id][inlined_entry.first];
+			auto &loaded_rows = loaded.inlined_deletes[table_id][inlined_entry.first.GetIdentifierName()];
 			for (auto &row_id : inlined_entry.second->rows) {
 				if (loaded_rows.find(row_id) != loaded_rows.end()) {
 					continue;
@@ -710,7 +710,7 @@ void DuckLakeBranchManager::CommitBranch(DuckLakeTransaction &transaction, DuckL
 				inlined_deleted_tables.insert(table_id);
 				AppendValues(inlined_rows,
 				             StringUtil::Format("(%d, %d, %d, %s, %d)", branch_id, new_seq, table_id.index,
-				                                SQLString::ToString(inlined_entry.first), row_id));
+				                                SQLString::ToString(inlined_entry.first.GetIdentifierName()), row_id));
 			}
 		}
 	}
@@ -1068,7 +1068,7 @@ void DuckLakeBranchManager::RebaseMainDeletes(DuckLakeTransaction &transaction, 
 					for (auto &row : file_deletes.replaced_rows) {
 						row_ids.insert(static_cast<idx_t>(row.second));
 					}
-					local_changes.AddNewInlinedDeletes(table_id, data_file_path, std::move(row_ids));
+					local_changes.AddNewInlinedDeletes(table_id, Identifier(data_file_path), std::move(row_ids));
 				}
 				if (branch_delete && row_merged) {
 					// main deleted the whole file since the fork; the row-by-row merge found every row the branch
