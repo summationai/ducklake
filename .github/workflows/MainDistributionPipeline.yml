@@ -1,5 +1,5 @@
 #
-# Builds the DuckLake branching extension for DuckDB v2.0.0 (.github/duckdb-version), the DuckDB that GizmoSQL v1.42.2
+# Builds the DuckLake branching extension for DuckDB v2.0.1 (.github/duckdb-version), the DuckDB that Hardcharger v2.13.4
 # embeds. Run by hand on a tag; pushes start nothing, so the fork spends no runners. It stays only until the release
 # pipeline (branching-release.yml) publishes its first v2.0.0-branching.ci.<n> release.
 #
@@ -35,7 +35,7 @@ jobs:
       # Temporary override; remove when extension-ci-tools updates its default.
       vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
       extension_name: ducklake
-      # The server only loads an extension stamped with its own DuckDB version (v2.0.0). This workflow passes
+      # The server only loads an extension stamped with its own DuckDB version (v2.0.1). This workflow passes
       # duckdb_version to the build as DUCKDB_VERSION, and the Makefile sets the same through OVERRIDE_GIT_DESCRIBE
       # for local builds.
       # only linux_arm64, what the GizmoSQL clusters run; this build runs no tests, so the full suite is run locally
