@@ -213,8 +213,8 @@ jobs:
       contents: read
     env:
       DUCKDB_VERSION: ${{ needs.duckdb-version.outputs.duckdb_version }}
-      # the official CLI of that release (duckdb-cli-linux-arm64.tar.gz of duckdb/duckdb v2.0.0)
-      DUCKDB_CLI_SHA256: 859e1875d2a9515fbb4bf8871061437a14af82320da68c753f094c4b776348fe
+      # the official CLI of that release (duckdb-cli-linux-arm64.tar.gz of duckdb/duckdb v2.0.1)
+      DUCKDB_CLI_SHA256: 84e37891fcc45c887e30220f51a4914995cd8174139e87f8efd311ac83c956a7
     steps:
       # smoke.sh, the committed public keys, and duckdb/scripts/compute-extension-hash.sh for the refusal copies
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
