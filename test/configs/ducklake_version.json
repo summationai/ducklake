@@ -134,6 +134,12 @@
         "test/sql/delete/deletion_vector_replaced_twice.test",
         "test/sql/rewrite_data_files/rewrite_deletion_vectors.test"
       ]
+    },
+    {
+      "reason": "DuckLake 1.0 reserves the inlined tables' column names (begin_snapshot, ...) for user tables when inlining is on; 1.1 prefixes them with _ducklake_",
+      "paths": [
+        "test/sql/branch/branch_inlined_column_names.test"
+      ]
     }
   ]
 }

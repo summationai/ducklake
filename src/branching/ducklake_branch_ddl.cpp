@@ -142,9 +142,10 @@ void AppendColumnRows(idx_t object_id, const DuckLakeColumnInfo &column, optiona
 	max_column_id = MaxValue(max_column_id, column.id.index);
 	rows.push_back(StringUtil::Format("%d, %d, %s, %d, %s, %s, %s, %s, %s, %s, %s", object_id, column.id.index,
 	                                  parent.IsValid() ? to_string(parent.GetIndex()) : string("NULL"), order,
-	                                  Literal(column.name), Literal(column.type), ValueLiteral(column.initial_default),
-	                                  ValueLiteral(column.default_value), Literal(column.default_value_type),
-	                                  column.nulls_allowed ? "true" : "false", ValueLiteral(comment)));
+	                                  Literal(column.name.GetIdentifierName()), Literal(column.type),
+	                                  ValueLiteral(column.initial_default), ValueLiteral(column.default_value),
+	                                  Literal(column.default_value_type), column.nulls_allowed ? "true" : "false",
+	                                  ValueLiteral(comment)));
 	for (idx_t child_idx = 0; child_idx < column.children.size(); child_idx++) {
 		AppendColumnRows(object_id, column.children[child_idx], column.id.index, child_idx, Value(), rows,
 		                 max_column_id);
@@ -188,7 +189,7 @@ DuckLakeBranchObjectRows EncodeView(DuckLakeLoadedBranch &loaded, DuckLakeViewEn
 	rows.object_row = StringUtil::Format(
 	    "%d, 'view', %d, %s, %s, NULL, NULL, %s, %s, %s, NULL", object_id, StoredSchemaId(loaded, schema, allocate),
 	    Literal(view.name.GetIdentifierName()), Literal(view.GetViewUUID()), Literal(view.GetQuerySQL()),
-	    Literal(DuckLakeUtil::ToQuotedList(IdentifiersToStrings(view.aliases))), ValueLiteral(view.comment));
+	    Literal(DuckLakeUtil::ToQuotedList(view.aliases)), ValueLiteral(view.comment));
 	return rows;
 }
 
@@ -432,7 +433,8 @@ unique_ptr<DuckLakeFieldId> ColumnFieldId(const DuckLakeColumnInfo &col) {
 		} else if (col.default_value_type == "expression") {
 			auto expressions = Parser::GetBuiltinParser().ParseExpressionList(col.default_value.GetValue<string>());
 			if (expressions.size() != 1) {
-				throw InvalidInputException("Branch column \"%s\" has an invalid default", col.name);
+				throw InvalidInputException("Branch column \"%s\" has an invalid default",
+				                            col.name.GetIdentifierName());
 			}
 			col_data.default_value = std::move(expressions[0]);
 		} else {
@@ -456,7 +458,8 @@ unique_ptr<DuckLakeFieldId> ColumnFieldId(const DuckLakeColumnInfo &col) {
 	} else if (StringUtil::CIEquals(col.type, "map") && child_fields.size() == 2) {
 		type = LogicalType::MAP(child_fields[0]->Type(), child_fields[1]->Type());
 	} else {
-		throw InvalidInputException("Branch column \"%s\" has an invalid nested type \"%s\"", col.name, col.type);
+		throw InvalidInputException("Branch column \"%s\" has an invalid nested type \"%s\"",
+		                            col.name.GetIdentifierName(), col.type);
 	}
 	return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(type), std::move(child_fields));
 }
@@ -589,7 +592,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 		}
 		column.order = row.GetValue<idx_t>(3);
 		column.info.id = FieldIndex(column.column_id);
-		column.info.name = row.GetValue<string>(4);
+		column.info.name = Identifier(row.GetValue<string>(4));
 		column.info.type = row.GetValue<string>(5);
 		column.info.initial_default = row.IsNull(6) ? Value() : Value(row.GetValue<string>(6));
 		column.info.default_value = row.IsNull(7) ? Value() : Value(row.GetValue<string>(7));
@@ -627,7 +630,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 			}
 			column.order = row.GetValue<idx_t>(5);
 			column.info.id = FieldIndex(column.column_id);
-			column.info.name = row.GetValue<string>(6);
+			column.info.name = Identifier(row.GetValue<string>(6));
 			column.info.type = row.GetValue<string>(7);
 			column.info.initial_default = row.IsNull(8) ? Value() : Value(row.GetValue<string>(8));
 			column.info.default_value = row.IsNull(9) ? Value() : Value(row.GetValue<string>(9));
@@ -777,7 +780,7 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 				}
 				AlterEntryData alter_data(table.ParentSchema().GetQualifiedName(table.name),
 				                          OnEntryNotFound::THROW_EXCEPTION);
-				RemoveColumnInfo info(alter_data, field->Name(), false, false);
+				RemoveColumnInfo info(alter_data, field->Name().GetIdentifierName(), false, false);
 				new_entry = table.Alter(context, transaction, info);
 			}
 			auto &next = new_entry->Cast<DuckLakeTableEntry>();
@@ -835,21 +838,21 @@ void DuckLakeBranchManager::LoadDefinitions(DuckLakeTransaction &transaction, co
 					// a later column may have taken its name
 					auto taken = [&](const string &name) {
 						for (auto &existing : columns) {
-							if (StringUtil::CIEquals(existing.info.name, name)) {
+							if (StringUtil::CIEquals(existing.info.name.GetIdentifierName(), name)) {
 								return true;
 							}
 						}
 						return false;
 					};
-					if (taken(column.info.name)) {
+					if (taken(column.info.name.GetIdentifierName())) {
 						auto base = column.info.name + "__dropped_" + to_string(column.column_id);
 						auto name = base;
 						for (idx_t suffix = 2; taken(name); suffix++) {
 							name = base + "_" + to_string(suffix);
 						}
-						column.info.name = name;
+						column.info.name = Identifier(name);
 					}
-					dropped_names.push_back(column.info.name);
+					dropped_names.push_back(column.info.name.GetIdentifierName());
 					columns.push_back(std::move(column));
 				}
 			}
@@ -993,7 +996,7 @@ unique_ptr<CatalogEntry> DuckLakeBranchManager::AddColumnWithIds(ClientContext &
 	auto result = copy->Alter(context, transaction, info);
 	if (!SameColumnIds(result->Cast<DuckLakeTableEntry>().GetAddColumnInfo(), column)) {
 		throw InvalidInputException("Column \"%s\" a branch added to table \"%s\" has inconsistent column ids",
-		                            column.name, table.name.GetIdentifierName());
+		                            column.name.GetIdentifierName(), table.name.GetIdentifierName());
 	}
 	return result;
 }

@@ -1,0 +1,46 @@
+# name: test/sql/branch/branch_inlined_column_names.test
+# description: user columns named like the forks' and the inlined tables' own columns don't clash with the pin check
+# group: [branch]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/branch_inlined_column_names_files', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+# a user column named fork does not clash with the active forks the pin check reads
+statement ok
+CREATE TABLE f(fork INTEGER, begin_snapshot INTEGER)
+
+statement ok
+INSERT INTO f VALUES (1, 1), (2, 2)
+
+statement ok
+CREATE BRANCH reads_f
+
+query I
+SELECT COUNT(*) FROM ducklake_flush_inlined_data('ducklake') WHERE table_name = 'f'
+----
+0
+
+statement ok
+DROP BRANCH reads_f
+
+query I
+SELECT COUNT(*) FROM ducklake_flush_inlined_data('ducklake') WHERE table_name = 'f'
+----
+1
+
+query II
+SELECT fork, begin_snapshot FROM f ORDER BY fork
+----
+1	1
+2	2
